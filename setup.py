@@ -16,7 +16,7 @@ setup(
         "numpy",
         "pandas",
         "matplotlib",
-        "PyQt5"
+        "PyQt5",
         "seaborn",
         "scikit-learn",
         "shap",
