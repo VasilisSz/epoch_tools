@@ -105,7 +105,6 @@ class Epochs:
             Epochs
                 A new Epochs object containing the subset.
         """
-        print(item)
         subset_epochs = self.epochs[item]
         new = Epochs(
             subset_epochs,
@@ -113,11 +112,14 @@ class Epochs:
             animal_id=self.animal_id,
             condition=self.condition,
         )
+        new.metadata = new.metadata.reset_index(drop=True)
         # Also slice features/labels
         if self.feats is not None:
             new.feats = self.feats[item]
+            new.feats = new.feats.reset_index(drop=True)
         if self.labels is not None:
             new.labels = self.labels[item]
+            new.labels = new.labels.reset_index(drop=True)
         return new
     
     # Feature selection methods
@@ -246,7 +248,7 @@ class Epochs:
             channels : list or 'all', optional
                 Channels to plot. Defaults to all channels.
         """
-        idx = np.random.choice(self.metadata.index) if idx is None else idx
+        idx = np.random.choice(self.epochs.metadata.index) if idx is None else idx
 
         if channels == 'all':
             n_channels = len(self.epochs.ch_names)
@@ -597,7 +599,7 @@ class Epochs:
             raise ValueError("Invalid file extension. Expected '-mne-epo.fif' or '-taini-epo.pkl'.")
         return fname
 
-    def save_taini(self, fname, overwrite=False):
+    def save_epochs(self, fname, overwrite=False):
         """
             Save the Epochs object.
 
@@ -625,7 +627,7 @@ class Epochs:
             pickle.dump(attributes_to_save, f)
 
     @classmethod
-    def load_taini(cls, fname):
+    def load_epochs(cls, fname):
         """
             Load a Epochs object.
 

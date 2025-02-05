@@ -270,7 +270,7 @@ class ClusterInterpreter:
             plt.show()
 
 
-    def plot_epoch_signal(self, n_epochs=5, channels_to_plot='all', cmap='hls', display=True):
+    def plot_epoch_signal(self, n_epochs=5, channels_to_plot='all', cmap='hls', nstd='auto', display=True):
         """
         Plot raw EEG signals for epochs from different clusters.
 
@@ -282,6 +282,8 @@ class ClusterInterpreter:
             Channels to include in the plot.
         cmap : str or list, optional
             Color map for channels.
+        nstd : int, optional (default='auto')
+            Number of standard deviations to plot around the mean for y-axis limits
         display : bool, optional
             Whether to display the plot immediately.
         """
@@ -324,6 +326,13 @@ class ClusterInterpreter:
                     ax_channel.set_ylabel(channel,rotation=0, ha='right')
                     ax_channel.set_xlabel('Time (samples)')
                     ax_channel.set_yticklabels([])
+
+                    # Channel y-axis limits as nstd from mean
+                    if nstd != 'auto':
+                        _d = self.epochs.get_data(picks=channel)[:, 0, :]
+                        _mean = np.mean(_d)
+                        _std = np.std(_d)
+                        ax_channel.set_ylim(_mean - nstd*_std, _mean + nstd*_std)
 
                     if k == 0:
                         ax_channel.spines['bottom'].set_visible(False)
