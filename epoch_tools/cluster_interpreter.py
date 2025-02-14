@@ -121,7 +121,7 @@ class ClusterInterpreter:
 
         print(f"Model trained on {len(self.X_train)} samples. Held out {len(self.X_test)} for testing.")
 
-    def plot_confusion_matrix(self, normalize=False, display=True):
+    def plot_confusion_matrix(self, normalize=False, ax=None, figsize=(5, 5), display=True):
         """
         Plot the confusion matrix of predicted labels on the test set.
 
@@ -137,15 +137,19 @@ class ClusterInterpreter:
         if normalize:
             cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 
-        plt.figure(figsize=(3, 3))
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+    
         sns.heatmap(cm, annot=True, cmap="Blues", fmt=".2f" if normalize else "d",
-                    xticklabels=self.model.classes_, yticklabels=self.model.classes_)
-        plt.xlabel("Predicted")
-        plt.ylabel("True")
-        plt.title("Confusion Matrix" + (" (Normalized)" if normalize else ""))
-        plt.tight_layout()
+                    xticklabels=self.model.classes_, yticklabels=self.model.classes_, ax=ax)
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("True")
+        ax.set_title("Confusion Matrix" + (" (Normalized)" if normalize else ""))
+        
         if display:
+            plt.tight_layout()
             plt.show()
+        return ax
 
     def get_accuracy(self):
         """
@@ -156,7 +160,7 @@ class ClusterInterpreter:
 
         return accuracy_score(self.y_test, self.y_pred)
 
-    def plot_feature_importances_global(self, top_n=20, display=True):
+    def plot_feature_importances_global(self, top_n=20, ax=None, figsize=(8, 5), display=True):
         """
         Plot the global (model-wide) feature importances from the trained model (if available).
         This does NOT distinguish among clusters; it's the overall importance in the multi-class setting.
@@ -178,20 +182,22 @@ class ClusterInterpreter:
         idxs = np.argsort(importances)[::-1]
         top_features = idxs[:top_n]
 
-        plt.figure(figsize=(8, 5))
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
         sns.barplot(
             x=importances[top_features],
             y=[feature_names[i] for i in top_features],
-            orient="h"
+            orient="h",
+            ax=ax
         )
-        plt.title(f"Top {top_n} Global Feature Importances ({self.model_type})")
-        plt.xlabel("Importance")
-        plt.tight_layout()
+        ax.set_title(f"Top {top_n} Global Feature Importances ({self.model_type})")
+        ax.set_xlabel("Importance")
         if display:
+            plt.tight_layout()
             plt.show()
     
 
-    def plot_feature_values(self, plot_type='violin', display=True, palette='tab10', **kwargs):
+    def plot_feature_values(self, exclude_features = [], plot_type='violin', palette='tab10', ax=None, figsize=None, display=True, **kwargs):
         """
         Visualize feature distributions for different clusters.
 
@@ -207,12 +213,18 @@ class ClusterInterpreter:
         
         data = self.epochs.feats.copy(deep=True)
         data['labels'] = self.epochs.labels
+        # Exclude features if specified
+        if exclude_features:
+            data = data.drop(columns=exclude_features)
+
         melt_df = data.melt(id_vars='labels', value_vars=self.epochs.feats.columns, 
                             var_name='Feature', value_name='Value')
         
-        n_features = len(self.epochs.feats.columns)
+        n_features = len(data.columns) - 1
         # figsize width scales with number of features
-        fig, ax = plt.subplots(figsize=(n_features, 6))
+        if ax is None:
+            figsize = (n_features, 6) if figsize is None else figsize
+            fig, ax = plt.subplots(figsize=figsize)
 
         if plot_type == 'violin':
             sns.violinplot(x='Feature', y='Value', hue='labels', data=melt_df, ax=ax, palette=palette, **kwargs)
@@ -226,12 +238,13 @@ class ClusterInterpreter:
         ax.set_title(f'Feature Values per Cluster')
         ax.legend(title="Cluster", loc='center left', bbox_to_anchor=(1, 0.5))
 
-        plt.tight_layout()
         if display:
+            plt.tight_layout()
             plt.show()
+        return ax
 
 
-    def plot_feature_density(self, display=True, palette='tab10', common_norm=False, **kwargs):
+    def plot_feature_density(self, common_norm=False, exclude_features = [], palette='tab10', figsize=None, display=True, **kwargs):
         """
         Plot kernel density estimations for feature distributions across clusters.
 
@@ -246,21 +259,34 @@ class ClusterInterpreter:
         """    
         
         data = self.epochs.feats.copy(deep=True)
+        # Exclude features if specified
+        if exclude_features:
+            data = data.drop(columns=exclude_features)
         features = data.columns
         n_features = len(features)
         data['labels'] = self.epochs.labels
     
         nrows, ncols = row_col_layout(n_features)
-        fig, ax = plt.subplots(nrows, ncols, figsize=(ncols*3, nrows*3))
+        figsize = (ncols*3.5, nrows*3.5) if figsize is None else figsize
+        fig, ax = plt.subplots(nrows, ncols, figsize=figsize)
         ax = ax.ravel()
 
         for i, feature in enumerate(features):
             sns.kdeplot(data=data, x=feature, hue='labels', ax=ax[i], fill=True,
                         legend=True,hue_order=np.sort(data['labels'].unique()),
                          palette=palette, common_norm=common_norm, **kwargs)
-            ax[i].get_legend().set_title("Cluster")
             ax[i].set_title(feature)
             ax[i].set_xlabel('')
+            # Determine row and column of the current subplot
+            row, col = divmod(i, ncols)
+            if col == ncols - 1:
+                ax[i].legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
+            else:
+                # Remove the legend for subplots not in the last column.
+                leg = ax[i].get_legend()
+                if leg is not None:
+                    leg.remove()
+
         # Remove unused axes
         for j in range(i+1, len(ax)):
             fig.delaxes(ax[j])
@@ -422,6 +448,7 @@ class ClusterInterpreter:
                    loc='upper left', bbox_to_anchor=(0, 0))
 
         if display:
+            plt.tight_layout()
             plt.show()
 
 

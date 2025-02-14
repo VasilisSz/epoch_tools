@@ -22,8 +22,10 @@ import tempfile
 import gzip
 import os
 import contextlib
+import copy
 
 from .utils import *
+import warnings
 
 class Epochs:
     def __init__(self, epochs, non_feature_cols=[], animal_id=None, condition=None):
@@ -56,6 +58,12 @@ class Epochs:
         self.features_subset = None
         self.feats = None
         self.labels = None
+        self.dims = None
+        self.dims_df = None
+        self.reducer = None
+        self.clusterer = None
+        self.reducer_params = None
+        self.clusterer_params = None
     
         # Clone the MNE Epochs object to inherit its functionality
     def __getattr__(self, attr):
@@ -463,6 +471,11 @@ class Epochs:
             reducer_params = {}
         if clusterer_params is None:
             clusterer_params = {}
+        
+        self.reducer = str(reducer)
+        self.clusterer = str(clusterer)
+        self.reducer_params = copy.deepcopy(reducer_params)
+        self.clusterer_params = copy.deepcopy(clusterer_params)
 
         # 1. Dimensionality Reduction (if applied)
         if reducer == 'umap':
@@ -479,6 +492,8 @@ class Epochs:
 
         else:
             data_reduced = data
+        self.dims = data_reduced.shape[1]
+        self.dims_df = pd.DataFrame(data_reduced, columns=[f'dim{i+1}' for i in range(self.dims)])
 
         # 2. Clustering
         if clusterer == 'kmeans':
@@ -493,6 +508,52 @@ class Epochs:
             raise ValueError("Unsupported clustering method. Choose from 'kmeans' or 'hdbscan'.")
 
         self.labels = labels
+
+    def plot_dim_reduction(self, dims=(1,2), ax=None, plot3d=False, plot_outliers=True,
+                  plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
+                  figsize3d = (10, 10), **kwargs):
+        """
+            Plot the dimensionaliry reduction results from self.dims_df
+        """
+        if self.dims_df is None:
+            raise ValueError("No dimensionality reduction results found. Run cluster_data() first.")
+        
+        plot_df = self.dims_df.copy()
+        if self.labels is not None:
+            plot_df['label'] = self.labels
+        
+        if not plot_outliers:
+            plot_df = plot_df[plot_df['label'] != -1]
+
+        if not all(f'dim{dim}' in self.dims_df.columns for dim in dims):
+            raise ValueError(f"One or more specified dimensions {dims} do not exist in the dimensionality reduction results. Current availabel dimensions {self.dims_df.columns}.")
+
+        dim1, dim2 = f'dim{dims[0]}', f'dim{dims[1]}'
+
+        if plot3d and len(dims) >= 3:
+            dim3 = f'dim{dims[2]}'
+            fig = plt.figure(figsize=figsize3d)
+            ax = fig.add_subplot(111, projection='3d')
+            if self.labels is not None and plot_labels:
+                ax.scatter(plot_df[dim1], plot_df[dim2], plot_df[dim3], c=plot_df['label'], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+            else:
+                ax.scatter(plot_df[dim1], plot_df[dim2], plot_df[dim3], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                ax.set_xlabel(dim1)
+                ax.set_ylabel(dim2)
+                ax.set_zlabel(dim3)
+            return ax
+        else:
+            if ax is None:
+                fig, ax = plt.subplots()
+            if self.labels is not None and plot_labels:
+                sns.scatterplot(data=plot_df, x=dim1, y=dim2, hue='label', palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
+            else:
+                sns.scatterplot(data=plot_df, x=dim1, y=dim2, ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                ax.set_xlabel(dim1)
+                ax.set_ylabel(dim2)
+            return ax
+
 
     # Feature vizualization methods
     def plot_simple_pca(self,  n_components=2, title='', **kwargs):
@@ -543,35 +604,64 @@ class Epochs:
         model.scatter(s=8, ax=ax[0], cmap='turbo', edgecolor=None)
         
         sns.barplot(data=results['topfeat'].sort_values(by='PC', ascending=True), y='feature', x='loading', hue='PC' ,dodge=False, ax=ax[1])
+        ax[1].legend(loc='upper left', bbox_to_anchor=(1, 1))
         plt.tight_layout()
 
-    def plot_tsne(self, n_components=2, ax=None, **kwargs):
+
+    def plot_tsne(self, n_components,reducer_params={}, ax=None, plot3d=False, plot_outliers=True,
+                  plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
+                  figsize3d = (10, 10), **kwargs):
         """
             Perform and plot t-SNE dimensionality reduction.
 
             Parameters:
             -----------
-            n_components : int, optional
+            n_components : int
                 Number of components for t-SNE.
             ax : matplotlib.axes, optional
                 Axes object to plot on.
+            3d_plot : bool, optional
+                Whether to create a 3D scatter plot.
         """
+        if 'n_components' in reducer_params:
+            reducer_params.pop('n_components')
+        reducer = TSNE(n_components=n_components, **reducer_params)
+        embedding = reducer.fit_transform(self.feats)
+        plot_df = pd.DataFrame(embedding, columns=[f't-SNE {i+1}' for i in range(embedding.shape[1])])
 
-        tsne_model = TSNE(n_components=n_components, **kwargs)
-        tsne_results = tsne_model.fit_transform(self.feats)
-        if ax is None:
-            fig, ax = plt.subplots()
         if self.labels is not None:
-            scatter = ax.scatter(tsne_results[:, 0], tsne_results[:, 1], c=self.labels, s=10, cmap='viridis', edgecolor='gray', alpha=0.5)
-            legend1 = ax.legend(*scatter.legend_elements(), title="Labels")
-            ax.add_artist(legend1)
-        else:
-            ax.scatter(tsne_results[:, 0], tsne_results[:, 1], s=8, color='blue', edgecolor='gray', alpha=0.5)
+            plot_df['label'] = self.labels
+        
+        if not plot_outliers:
+            plot_df = plot_df[plot_df['label'] != -1]
+
+        if plot3d and n_components >= 3:
+            fig = plt.figure(figsize=figsize3d)
+            ax = fig.add_subplot(111, projection='3d')
+            if self.labels is not None and plot_labels:
+                ax.scatter(plot_df['t-SNE 1'], plot_df['t-SNE 2'], plot_df['t-SNE 3'], c=plot_df['label'], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+            else:
+                ax.scatter(plot_df['t-SNE 1'], plot_df['t-SNE 2'], plot_df['t-SNE 3'], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha,**kwargs)
             ax.set_xlabel('t-SNE 1')
             ax.set_ylabel('t-SNE 2')
-        return ax
-    
-    def plot_umap(self, n_components, ax=None, **kwargs):
+            ax.set_zlabel('UMt-SNEAP 3')
+            return ax
+        else:
+            if ax is None:
+                fig, ax = plt.subplots()
+            if self.labels is not None and plot_labels:
+                fig = sns.scatterplot(data=plot_df, x='t-SNE 1', y='t-SNE 2', hue='label', palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
+            else:
+                sns.scatterplot(data=plot_df, x='t-SNE 1', y='t-SNE 2', ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+            ax.set_xlabel('t-SNE 1')
+            ax.set_ylabel('t-SNE 2')
+            return ax  
+
+
+    def plot_umap(self, n_components,reducer_params={}, ax=None, plot3d=False, plot_outliers=True,
+                  plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
+                  figsize3d = (10, 10), **kwargs):
         """
             Perform and plot UMAP dimensionality reduction.
 
@@ -581,20 +671,46 @@ class Epochs:
                 Number of components for UMAP.
             ax : matplotlib.axes, optional
                 Axes object to plot on.
+            3d_plot : bool, optional
+                Whether to create a 3D scatter plot.
         """
-        reducer = umap.UMAP(n_components=n_components, **kwargs)
+        if 'n_components' in reducer_params:
+            reducer_params.pop('n_components')
+        reducer = umap.UMAP(n_components=n_components, **reducer_params)
+
         embedding = reducer.fit_transform(self.feats)
-        if ax is None:
-            fig, ax = plt.subplots()
+
+        plot_df = pd.DataFrame(embedding, columns=[f'UMAP {i+1}' for i in range(embedding.shape[1])])
+
         if self.labels is not None:
-            scatter = ax.scatter(embedding[:, 0], embedding[:, 1], c=self.labels, s=10, cmap='viridis', edgecolor='gray', alpha=0.5)
-            legend1 = ax.legend(*scatter.legend_elements(), title="Labels")
-            ax.add_artist(legend1)
+            plot_df['label'] = self.labels
+        
+        if not plot_outliers:
+            plot_df = plot_df[plot_df['label'] != -1]
+
+        if plot3d and n_components >= 3:
+            fig = plt.figure(figsize=figsize3d)
+            ax = fig.add_subplot(111, projection='3d')
+            if self.labels is not None and plot_labels:
+                ax.scatter(plot_df['UMAP 1'], plot_df['UMAP 2'], plot_df['UMAP 3'], c=plot_df['label'], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+            else:
+                ax.scatter(plot_df['UMAP 1'], plot_df['UMAP 2'], plot_df['UMAP 3'], cmap=palette, edgecolor=edgecolor, s=s, alpha=alpha,**kwargs)
+            ax.set_xlabel('UMAP 1')
+            ax.set_ylabel('UMAP 2')
+            ax.set_zlabel('UMAP 3')
+            return ax
         else:
-            ax.scatter(embedding[:, 0], embedding[:, 1], s=10, color='black', edgecolor='gray', alpha=0.5)
-        ax.set_xlabel('UMAP 1')
-        ax.set_ylabel('UMAP 2')
-        return ax
+            if ax is None:
+                fig, ax = plt.subplots()
+            if self.labels is not None and plot_labels:
+                fig = sns.scatterplot(data=plot_df, x='UMAP 1', y='UMAP 2', hue='label', palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
+            else:
+                sns.scatterplot(data=plot_df, x='UMAP 1', y='UMAP 2', ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+            ax.set_xlabel('UMAP 1')
+            ax.set_ylabel('UMAP 2')
+            return ax  
+
 
     def plot_feature_correlation(self, ax=None, **kwargs):
         """
@@ -638,12 +754,16 @@ class Epochs:
 
     def save_epochs(self, fname, overwrite=False):
         """
+            DEPRECATED:
             Save the Epochs object.
 
             Parameters:
             fname (str): The base filename.
             overwrite (bool): Whether to overwrite existing files.
         """
+        # depraecated warning
+        warnings.warn("save_epochs() method is deprecated and will be removed in the next version. Use save_gz() instead.", DeprecationWarning)
+
         # Validate and extract base filename
         base_fname = self._parse_base_name(fname)
         mne_fname = f"{base_fname}-mne-epo.fif"
@@ -674,6 +794,7 @@ class Epochs:
             Returns:
             Epochs: The loaded Epochs object.
         """
+        warnings.warn("load_epochs() method is deprecated and will be removed in the next version. Use load_gz() instead.", DeprecationWarning)
         # Validate and extract base filename
         base_fname = cls._parse_base_name(fname)
         mne_fname = f"{base_fname}-mne-epo.fif"
@@ -702,7 +823,7 @@ class Epochs:
         Save the entire object (including MNE Epochs) into a single gzip-compressed file.
         
         Parameters:
-            fname (str): Filename for the saved file (e.g., 'my_epochs.pkl.gz').
+            fname (str): Filename for the saved file (e.g., 'my_epochs.gz').
             overwrite (bool): If False and file exists, raises an error.
         """
         # Check filname extension
