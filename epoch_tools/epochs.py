@@ -18,7 +18,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 import pickle
+import tempfile
+import gzip
 import os
+import contextlib
 
 from .utils import *
 
@@ -89,6 +92,40 @@ class Epochs:
         epochs_attrs = set(dir(self.epochs))
         # Combine and sort
         return sorted(taini_attrs.union(epochs_attrs))
+    
+        # Custom serialization methods for pickle:
+    def __getstate__(self):
+        """Prepare the object’s state for pickling."""
+        state = self.__dict__.copy()
+        # Instead of pickling the MNE epochs object, we save it to a temporary file
+        # and store the file’s binary content.
+        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif', delete=False) as tmp:
+            tmp_name = tmp.name
+        # Save using MNE’s built-in method (which includes internal compression)
+        with open(os.devnull, 'w') as fnull: #mute the Overwriting existing file info message
+            with contextlib.redirect_stdout(fnull):
+                self.epochs.save(tmp_name, overwrite=True)
+        # Read the saved file into bytes
+        with open(tmp_name, 'rb') as f:
+            state['epochs_bytes'] = f.read()
+        # Clean up: remove the temporary file
+        os.remove(tmp_name)
+        # Remove the original epochs attribute from the state
+        del state['epochs']
+        return state
+
+    def __setstate__(self, state):
+        """Restore the object’s state from the pickled state."""
+        # Extract the saved bytes and write them back to a temporary file.
+        epochs_bytes = state.pop('epochs_bytes')
+        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif', delete=False) as tmp:
+            tmp_name = tmp.name
+            tmp.write(epochs_bytes)
+        # Re-load the MNE epochs object
+        self.epochs = mne.read_epochs(tmp_name)
+        os.remove(tmp_name)
+        # Update the instance dictionary with the remaining state
+        self.__dict__.update(state)
     
 
     def __getitem__(self, item):
@@ -660,6 +697,36 @@ class Epochs:
         obj.__dict__.update(attributes)
         return obj
     
+    def save_gz(self, fname, overwrite=False):
+        """
+        Save the entire object (including MNE Epochs) into a single gzip-compressed file.
+        
+        Parameters:
+            fname (str): Filename for the saved file (e.g., 'my_epochs.pkl.gz').
+            overwrite (bool): If False and file exists, raises an error.
+        """
+        # Check filname extension
+        if not fname.endswith('.gz'):
+            raise ValueError("Filename must end with '.gz'.")
+        if not overwrite and os.path.exists(fname):
+            raise FileExistsError(f"File '{fname}' already exists.")
+        with gzip.open(fname, 'wb') as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load_gz(cls, fname):
+        """
+        Load the object from a gzip-compressed file.
+        
+        Parameters:
+            fname (str): The filename to load (e.g., 'my_epochs.gz').
+            
+        Returns:
+            Epochs: The loaded Epochs object.
+        """
+        with gzip.open(fname, 'rb') as f:
+            obj = pickle.load(f)
+        return obj
 
 
 
