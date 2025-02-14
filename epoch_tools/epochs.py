@@ -712,12 +712,15 @@ class Epochs:
             return ax  
 
 
-    def plot_feature_correlation(self, ax=None, **kwargs):
+    def plot_feature_correlation(self, threshold=0.8, ax=None, 
+                                 cmap='coolwarm', vmin=-1, vmax=1, annot=False, fmt='.2f', **kwargs):
         """
-            Plot the correlation matrix of extracted features.
+            Plot the correlation matrix of extracted features and mark correlations above a threshold.
 
             Parameters:
             -----------
+            threshold : float, optional
+                Threshold above which to mark the correlations.
             ax : matplotlib.axes, optional
                 Axes object to plot on.
         """
@@ -725,8 +728,15 @@ class Epochs:
         if ax is None:
             fig, ax = plt.subplots(figsize=(13, 12))
         
-        sns.heatmap(corr, ax=ax, cmap='coolwarm',vmin=-1, vmax=1, **kwargs)
+        sns.heatmap(corr, ax=ax, cmap=cmap, vmin=vmin, vmax=vmax, annot=annot, fmt=fmt, **kwargs)
         ax.set_title('Feature Correlation Matrix')
+
+        # Mark correlations above the threshold
+        for i in range(len(corr.columns)):
+            for j in range(i):
+                if abs(corr.iloc[i, j]) > threshold:
+                    ax.text(j + 0.5, i + 0.5, '*', color='black', ha='center', va='center')
+
         return ax
     
     def plot_hierarchy(self):
