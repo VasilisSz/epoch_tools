@@ -471,24 +471,23 @@ class Epochs:
             reducer_params = {}
         if clusterer_params is None:
             clusterer_params = {}
-        
-        self.reducer = str(reducer)
-        self.clusterer = str(clusterer)
+    
+
         self.reducer_params = copy.deepcopy(reducer_params)
         self.clusterer_params = copy.deepcopy(clusterer_params)
 
         # 1. Dimensionality Reduction (if applied)
         if reducer == 'umap':
-            reducer_model = umap.UMAP(**reducer_params)
-            data_reduced = reducer_model.fit_transform(data)
+            self.reducer = umap.UMAP(**reducer_params)
+            data_reduced = self.reducer.fit_transform(data)
 
         elif reducer == 'pca':
-            reducer_model = PCA(**reducer_params)
-            data_reduced = reducer_model.fit_transform(data)
+            self.reducer = PCA(**reducer_params)
+            data_reduced = self.reducer.fit_transform(data)
 
         elif reducer == 't-sne':
-            reducer_model = TSNE(**reducer_params)
-            data_reduced = reducer_model.fit_transform(data)
+            self.reducer = TSNE(**reducer_params)
+            data_reduced = self.reducer.fit_transform(data)
 
         else:
             data_reduced = data
@@ -497,16 +496,20 @@ class Epochs:
 
         # 2. Clustering
         if clusterer == 'kmeans':
-            clusterer_model = KMeans(**clusterer_params)
-            labels = clusterer_model.fit_predict(data_reduced)
+            self.clusterer = KMeans(**clusterer_params)
+            labels = self.clusterer.fit_predict(data_reduced)
 
         elif clusterer == 'hdbscan':
-            clusterer_model = hdbscan.HDBSCAN(**clusterer_params)
-            labels = clusterer_model.fit_predict(data_reduced)
+            self.clusterer = hdbscan.HDBSCAN(**clusterer_params)
+            labels = self.clusterer.fit_predict(data_reduced)
 
         else:
             raise ValueError("Unsupported clustering method. Choose from 'kmeans' or 'hdbscan'.")
-
+        
+        # Print results
+        print("Number of clusters:", len(np.unique(labels)))
+        print(f"Percentage of clustered points: {np.sum(labels != -1) / len(labels) * 100}")
+        
         self.labels = labels
 
     def plot_dim_reduction(self, dims=(1,2), ax=None, plot3d=False, plot_outliers=True,

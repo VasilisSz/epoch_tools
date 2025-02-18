@@ -121,7 +121,7 @@ class ClusterInterpreter:
 
         print(f"Model trained on {len(self.X_train)} samples. Held out {len(self.X_test)} for testing.")
 
-    def plot_confusion_matrix(self, normalize=False, ax=None, figsize=(5, 5), display=True):
+    def plot_confusion_matrix(self, normalize=False, annot=True, cmap="Blues", ax=None, figsize=(5, 5), display=True):
         """
         Plot the confusion matrix of predicted labels on the test set.
 
@@ -140,7 +140,7 @@ class ClusterInterpreter:
         if ax is None:
             _, ax = plt.subplots(figsize=figsize)
     
-        sns.heatmap(cm, annot=True, cmap="Blues", fmt=".2f" if normalize else "d",
+        sns.heatmap(cm, annot=annot, cmap=cmap,
                     xticklabels=self.model.classes_, yticklabels=self.model.classes_, ax=ax)
         ax.set_xlabel("Predicted")
         ax.set_ylabel("True")
@@ -378,7 +378,7 @@ class ClusterInterpreter:
             plt.show()
 
 
-    def plot_feature_hierarchy(self, method='ward', cmap='coolwarm', 
+    def plot_feature_hierarchy(self, plot_outliers=True, method='ward', cmap='coolwarm', 
                             row_cluster=False, col_cluster=True,
                             figsize='auto', vmin=-3, vmax=3,
                             col_colors='labels', display=True):
@@ -407,6 +407,9 @@ class ClusterInterpreter:
         data = self.epochs.feats.copy(deep=True)
         n_features = len(data.columns)
         data['Cluster'] = self.epochs.labels
+
+        if not plot_outliers:
+            data = data[data['Cluster'] != -1]
 
         # Color labels
         if col_colors == 'labels':
