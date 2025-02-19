@@ -157,7 +157,7 @@ class Epochs:
             animal_id=self.animal_id,
             condition=self.condition,
         )
-        new.metadata = new.metadata.reset_index(drop=True)
+        new.metadata = subset_epochs.metadata.reset_index(drop=True)
         # Also slice features/labels
         if self.feats is not None:
             new.feats = self.feats[item]
