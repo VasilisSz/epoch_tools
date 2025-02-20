@@ -168,7 +168,6 @@ class Epochs:
             new.feats = new.feats.reset_index(drop=True)
         if self.labels is not None:
             new.labels = self.labels[item]
-            new.labels = new.labels.reset_index(drop=True)
         return new
     def __deepcopy__(self, memo):
         # Create a new instance with a copied MNE Epochs

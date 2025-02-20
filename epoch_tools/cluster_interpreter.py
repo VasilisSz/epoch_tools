@@ -518,7 +518,10 @@ class ClusterInterpreter:
         n_clusters = shap_values.shape[2]
 
         if cluster is not None:
-            cluster_shap_vals = shap_values[:, :, cluster]
+
+            # Adjust cluster index if -1 exist in the labels
+            cluster_i = cluster+1 if -1 in self.y else cluster
+            cluster_shap_vals = shap_values[:, :, cluster_i]
 
             if figsize is None:
                 figsize = (10, 4)
@@ -539,7 +542,8 @@ class ClusterInterpreter:
 
             for cluster_idx in range(n_clusters):
                 cluster_shap_vals = shap_values[:, :, cluster_idx]
-                
+                cluster_label = cluster_idx-1 if -1 in self.y else cluster_idx
+
                 # Set current axis so shap.summary_plot() draws there
                 plt.sca(axes[cluster_idx])
 
@@ -554,7 +558,7 @@ class ClusterInterpreter:
                 )
                 
                 # You can set a custom subplot title here
-                axes[cluster_idx].set_title(f"Cluster {cluster_idx}", fontsize=12)
+                axes[cluster_idx].set_title(f"Cluster {cluster_label}", fontsize=12)
 
             plt.tight_layout()
             if display:
@@ -598,9 +602,10 @@ class ClusterInterpreter:
         if cluster is not None:
             if cluster >= n_clusters:
                 raise ValueError(f"Requested cluster={cluster} exceeds the number of clusters={n_clusters}")
-            shap_values = shap_values[:, :, cluster]  # shape (n_shap_samples, n_features)
             
-            
+            cluster_i = cluster+1 if -1 in self.y else cluster
+            shap_values = shap_values[:, :, cluster_i]  # shape (n_shap_samples, n_features)
+
             if figsize is None:
                 figsize = (10, 5)
             fig, axes = plt.subplots(1, 1, figsize=figsize)
@@ -629,7 +634,9 @@ class ClusterInterpreter:
 
             for cluster_idx in range(n_clusters):
                 cluster_shap_vals = shap_values[:, :, cluster_idx]
-                
+
+                cluster_label = cluster-1 if -1 in self.y else cluster
+
                 # Set current axis so shap.summary_plot() draws there
                 plt.sca(axes[cluster_idx])
 
@@ -644,7 +651,7 @@ class ClusterInterpreter:
                     **kwargs
                 )
                 # You can set a custom subplot title here
-                axes[cluster_idx].set_title(f"Cluster {cluster_idx}", fontsize=12)
+                axes[cluster_idx].set_title(f"Cluster {cluster_label}", fontsize=12)
 
             plt.tight_layout()
             if display:
@@ -656,6 +663,7 @@ class ClusterInterpreter:
                                 interaction_feature=None,
                                 cluster=None,
                                 n_shap_samples=2000,
+                                figsize=(6, 5),
                                 display=True):
         """
         Plots a SHAP dependence plot for a given feature (and optional interaction feature).
@@ -682,7 +690,8 @@ class ClusterInterpreter:
         if cluster is not None:
             if cluster >= n_classes:
                 raise ValueError(f"Requested cluster={cluster} exceeds the number of classes={n_classes}")
-            shap_values = shap_values_3d[:, :, cluster]  # shape (n_shap_samples, n_features)
+            cluster_i = cluster+1 if -1 in self.y else cluster
+            shap_values = shap_values_3d[:, :, cluster_i]  # shape (n_shap_samples, n_features)
         else:
             # For multi-class, you can either pick a single cluster or average across classes
             # or pass them all. shap.dependence_plot typically needs a 2D array, so let's
@@ -699,7 +708,7 @@ class ClusterInterpreter:
                 raise ValueError(f"No samples found for cluster={cluster} in the first {n_shap_samples} rows.")
 
         
-        fig = plt.figure(figsize=(6, 5))
+        fig = plt.figure(figsize=figsize)
         shap.dependence_plot(
             ind=feature,
             shap_values=shap_values,
@@ -707,13 +716,12 @@ class ClusterInterpreter:
             interaction_index=interaction_feature,
             show=False  # to allow capturing or customizing the plot
         )
-        plt.title(f"SHAP Dependence Plot on '{feature}'" +
+        plt.set_title(f"SHAP Dependence Plot on '{feature}'" +
                 (f" (Cluster {cluster})" if cluster is not None else ""), fontsize=14)
 
         if display:
             plt.show()
-        # else:
-        #     return fig
+
         
     def generate_report(self, methods, filename="report.pdf", method_configs=None, overwrite=False):
         """

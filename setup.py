@@ -28,6 +28,7 @@ setup(
         "shap",
         "xgboost",
         "catboost",
+        "bayesian-optimization"
 
     ],
     classifiers=[
