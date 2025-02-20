@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 import umap.umap_ as umap
 import pca
 import hdbscan
+from tqdm import tqdm
 
 import ipywidgets as widgets
 from IPython.display import display
@@ -23,9 +24,12 @@ import gzip
 import os
 import contextlib
 import copy
+import warnings
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn.utils.deprecation")
+warnings.filterwarnings("ignore", category=UserWarning, module="umap")
 
 from .utils import *
-import warnings
 
 class Epochs:
     def __init__(self, epochs, non_feature_cols=[], animal_id=None, condition=None):
@@ -157,7 +161,7 @@ class Epochs:
             animal_id=self.animal_id,
             condition=self.condition,
         )
-        new.metadata = subset_epochs.metadata.reset_index(drop=True)
+        new.metadata = self.metadata[item]
         # Also slice features/labels
         if self.feats is not None:
             new.feats = self.feats[item]
@@ -166,6 +170,25 @@ class Epochs:
             new.labels = self.labels[item]
             new.labels = new.labels.reset_index(drop=True)
         return new
+    def __deepcopy__(self, memo):
+        # Create a new instance with a copied MNE Epochs
+        new_instance = self.__class__(
+            self.epochs.copy(),  # Use MNE's own copy method for the underlying object
+            non_feature_cols=copy.deepcopy(self.non_feature_cols, memo),
+            animal_id=self.animal_id,
+            condition=self.condition,
+        )
+        new_instance.metadata = self.metadata.copy() if self.metadata is not None else None
+        new_instance.features_subset = copy.deepcopy(self.features_subset, memo)
+        new_instance.feats = self.feats.copy() if self.feats is not None else None
+        new_instance.labels = self.labels.copy() if self.labels is not None else None
+        new_instance.dims = self.dims
+        new_instance.dims_df = self.dims_df.copy() if self.dims_df is not None else None
+        new_instance.reducer = copy.deepcopy(self.reducer, memo)
+        new_instance.clusterer = copy.deepcopy(self.clusterer, memo)
+        new_instance.reducer_params = copy.deepcopy(self.reducer_params, memo)
+        new_instance.clusterer_params = copy.deepcopy(self.clusterer_params, memo)
+        return new_instance
     
     # Feature selection methods
 
@@ -217,7 +240,7 @@ class Epochs:
         """
         return self.metadata[self.feature_cols]
     
-    def get_features(self, scaler=None, dropna=False, ch_names = None, as_array=False):
+    def get_features(self, scaler='standard', dropna=True, ch_names = None, as_array=False):
         """
             Extract features from the metadata with optional scaling.
 
@@ -242,6 +265,7 @@ class Epochs:
 
         if dropna:
             feats = feats.dropna()
+            self.feats_idx = feats.index
             
         # Selecting features subset
         if self.features_subset:
@@ -435,7 +459,8 @@ class Epochs:
         reducer=None,            # one of {None, 'umap', 'pca', 't-sne'}
         clusterer='kmeans',      # one of {'kmeans', 'hdbscan'}
         reducer_params=None,     # dict of parameters for the reducer
-        clusterer_params=None    # dict of parameters for the clusterer
+        clusterer_params=None,    # dict of parameters for the clusterer
+        verbose=True
     ):
         """
             Clusters data based on an optional dimensionality reducer and a chosen clustering algorithm.
@@ -469,12 +494,12 @@ class Epochs:
         # Set defaults if dictionaries are None TODO: Add default values
         if reducer_params is None:
             reducer_params = {}
+            print("No reducer parameters provided. Using default values.")
         if clusterer_params is None:
             clusterer_params = {}
+            print("No clusterer parameters provided. Using default values.")
     
 
-        self.reducer_params = copy.deepcopy(reducer_params)
-        self.clusterer_params = copy.deepcopy(clusterer_params)
 
         # 1. Dimensionality Reduction (if applied)
         if reducer == 'umap':
@@ -506,11 +531,368 @@ class Epochs:
         else:
             raise ValueError("Unsupported clustering method. Choose from 'kmeans' or 'hdbscan'.")
         
+        self.reducer_params = copy.deepcopy(reducer_params) if len(reducer_params) == 0 else copy.deepcopy(self.reducer.get_params())
+        self.clusterer_params = copy.deepcopy(clusterer_params) if len(clusterer_params) == 0 else copy.deepcopy(self.clusterer.get_params())
+
         # Print results
-        print("Number of clusters:", len(np.unique(labels)))
-        print(f"Percentage of clustered points: {np.sum(labels != -1) / len(labels) * 100}")
+        if verbose:
+            print("Number of clusters:", len(np.unique(labels)))
+            print(f"Percentage of clustered points: {np.sum(labels != -1) / len(labels) * 100}")
         
         self.labels = labels
+
+    def clustering_grid_search(self, reducer, clusterer,
+                               reducer_params, clusterer_params,
+                               evaluation="metrics",
+                               bayesian_metric="composite",
+                               best_criterion="composite",
+                               bayesian_iterations=25,
+                               plot_clusters=False,
+                               random_seed = 42):
+        """
+        Perform a grid search over different clustering hyperparameters.
+
+        Parameters
+        ----------
+        reducer : str or None
+            The dimensionality reducer to use (e.g. 'umap', 'pca', 't-sne' or None).
+        clusterer : str
+            The clustering algorithm to use ('kmeans' or 'hdbscan').
+        reducer_params : dict
+            Dictionary where each key is a reducer parameter name and its value is a list of options.
+        clusterer_params : dict
+            Dictionary where each key is a clusterer parameter name and its value is a list of options.
+        evaluation : {"metrics", "bayesian"}, optional
+            Which evaluation strategy to use.
+            - "metrics": try every parameter combination and evaluate with several clustering metrics.
+            - "bayesian": use Bayesian optimization (numeric parameters only).
+        bayesian_metric : str, optional
+            For bayesian evaluation: which metric to optimize. Options include "silhouette",
+            "davies", "calinski", "n_clusters", "percent_clustered", or "composite". Default is "composite".
+        best_criterion : str, optional
+            Which metric to use for selecting the best parameter combination.
+            Options: "silhouette", "davies", "calinski", "n_clusters", "percent_clustered", or "composite".
+        bayesian_iterations : int, optional
+            Number of Bayesian optimization iterations (only used if evaluation=="bayesian").
+
+        Returns
+        -------
+        best_params : dict
+            A dictionary with keys "reducer_params" and "clusterer_params" for the best-found combination.
+        """
+        import itertools
+        from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+
+        # Set random seed for reproducibility
+        np.random.seed(random_seed)
+
+        # === Parameter Checks ===
+        if self.feats is None:
+            raise ValueError("No features found. Run get_features() first.")
+
+        if not isinstance(reducer_params, dict):
+            raise ValueError("reducer_params must be a dictionary.")
+        if not isinstance(clusterer_params, dict):
+            raise ValueError("clusterer_params must be a dictionary.")
+        for key, val in reducer_params.items():
+            if not isinstance(val, list) or len(val) == 0:
+                raise ValueError(f"Reducer parameter '{key}' must be a non-empty list.")
+        for key, val in clusterer_params.items():
+            if not isinstance(val, list) or len(val) == 0:
+                raise ValueError(f"Clusterer parameter '{key}' must be a non-empty list.")
+
+        if evaluation not in ["metrics", "bayesian"]:
+            raise ValueError("evaluation must be either 'metrics' or 'bayesian'.")
+        if reducer is not None and reducer not in ["umap", "pca", "t-sne"]:
+            raise ValueError("Reducer must be one of ['umap', 'pca', 't-sne'] or None.")
+        if clusterer not in ["kmeans", "hdbscan"]:
+            raise ValueError("Clusterer must be one of ['kmeans', 'hdbscan'].")
+
+        allowed_bayesian_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+        if bayesian_metric not in allowed_bayesian_metrics:
+            raise ValueError(f"bayesian_metric must be one of {allowed_bayesian_metrics}.")
+
+        allowed_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+        if best_criterion not in allowed_metrics:
+            print(f"Warning: best_criterion '{best_criterion}' not in allowed metrics. Defaulting to 'composite'.\nOr select from: {allowed_metrics}")
+            best_criterion = "composite"
+
+        if evaluation == "bayesian":
+            # Ensure all parameter values are numeric
+            for param_dict in [reducer_params, clusterer_params]:
+                for key, vals in param_dict.items():
+                    for v in vals:
+                        try:
+                            float(v)
+                        except Exception:
+                            raise ValueError(f"Bayesian evaluation requires numeric values for parameter '{key}', got value {v}.")
+
+        # === Grid Search Evaluation ===
+        if evaluation == "metrics":
+            results = []
+            # Create all parameter combinations
+            reducer_keys = list(reducer_params.keys())
+            reducer_combos = list(itertools.product(*[reducer_params[k] for k in reducer_keys]))
+            clusterer_keys = list(clusterer_params.keys())
+            clusterer_combos = list(itertools.product(*[clusterer_params[k] for k in clusterer_keys]))
+
+            # Initialize a plotting figure
+            if plot_clusters:
+                fig, ax = plt.subplots(len(reducer_combos), len(clusterer_combos), figsize=(5*len(clusterer_combos), 3.5*len(reducer_combos)))
+
+                # fix if axes has only 1 dimension
+                if len(reducer_combos) == 1:
+                    ax = ax[np.newaxis, :]
+                if len(clusterer_combos) == 1:
+                    ax = ax[:, np.newaxis]
+
+            # Iterate over all combinations
+            with tqdm(total=len(reducer_combos) * len(clusterer_combos), desc="Grid Search") as pbar:
+                for i, r_combo in enumerate(reducer_combos):
+                    r_dict = dict(zip(reducer_keys, r_combo))
+                    for j, c_combo in enumerate(clusterer_combos):
+                        c_dict = dict(zip(clusterer_keys, c_combo))
+                        # Use deepcopy so that clustering does not alter the original object
+                        temp_obj = copy.deepcopy(self)
+                        try:
+                            temp_obj.cluster_data(reducer=reducer, clusterer=clusterer,
+                                                reducer_params={**r_dict, 'random_state': random_seed}, 
+                                                clusterer_params=c_dict, 
+                                                verbose=False)
+                        except Exception as e:
+                            print(f"Combination Reducer:{r_dict} & Clusterer:{c_dict} failed: {e}")
+                            continue
+
+                        labels = temp_obj.labels
+                        valid_clusters = [lab for lab in np.unique(labels) if lab != -1]
+                        if len(valid_clusters) < 2:
+                            sil = -1
+                            davies = np.inf
+                            calinski = -1
+                        else:
+                            data_used = temp_obj.dims_df.values if temp_obj.dims_df is not None else temp_obj.feats.values
+                            sil = silhouette_score(data_used, labels)
+                            davies = davies_bouldin_score(data_used, labels)
+                            calinski = calinski_harabasz_score(data_used, labels)
+
+                        n_clusters = len(valid_clusters)
+                        percent_clustered = np.sum(labels != -1) / len(labels) * 100
+
+                        results.append({
+                            **{f"reducer_{k}": v for k, v in r_dict.items()},
+                            **{f"clusterer_{k}": v for k, v in c_dict.items()},
+                            "param_combo": f"Reducer: {r_dict}, Clusterer: {c_dict}",
+                            "silhouette": sil,
+                            "davies": davies,
+                            "calinski": calinski,
+                            "n_clusters": n_clusters,
+                            "percent_clustered": percent_clustered
+                        })
+
+                        if plot_clusters:
+                            temp_obj.plot_umap(n_components = 2, # doesn't matter
+                                            ax=ax[i, j],
+                                            reducer_params={**r_dict, "random_state": random_seed}, palette="Set2")
+                            # add a textbox with the current reducer/clusterer combo
+                            reducer_text = "\n".join([f"{k}: {v}" for k, v in r_dict.items()])
+                            clusterer_text = "\n".join([f"{k}: {v}" for k, v in c_dict.items()])
+                            textbox = f"Reducer:\n{reducer_text}\nClusterer:\n{clusterer_text}"
+                            ax[i, j].text(1.05, 0.025, textbox,
+                                        transform=ax[i, j].transAxes, fontsize=8,
+                                        verticalalignment='bottom',
+                                        horizontalalignment='left',
+                                        bbox=dict(facecolor='white', alpha=0.7),
+                                        )
+                        pbar.update(1)
+
+            results_df = pd.DataFrame(results)
+            if results_df.empty:
+                print("No valid clustering combinations found.")
+                return None, None
+
+            # Normalize metrics for composite score (for metrics where higher is better)
+            for metric in ["silhouette", "calinski", "n_clusters", "percent_clustered"]:
+                mn = results_df[metric].min()
+                mx = results_df[metric].max()
+                if mx - mn != 0:
+                    results_df[f"norm_{metric}"] = (results_df[metric] - mn) / (mx - mn)
+                else:
+                    results_df[f"norm_{metric}"] = 0
+            # For Davies–Bouldin, lower is better so invert the normalization
+            mn = results_df["davies"].min()
+            mx = results_df["davies"].max()
+            if mx - mn != 0:
+                results_df["norm_davies"] = (mx - results_df["davies"]) / (mx - mn)
+            else:
+                results_df["norm_davies"] = 0
+
+            # Composite score (equal weighting)
+            results_df["composite"] = (
+                results_df["norm_silhouette"] +
+                results_df["norm_davies"] +
+                results_df["norm_calinski"] +
+                results_df["norm_n_clusters"] +
+                results_df["norm_percent_clustered"]
+            ) / 5
+
+            best_idx = results_df[best_criterion].idxmax()
+            best_params = {
+                "reducer_params": {k.replace("reducer_", ""): results_df.loc[best_idx, k]
+                                     for k in results_df.columns if k.startswith("reducer_")},
+                "clusterer_params": {k.replace("clusterer_", ""): results_df.loc[best_idx, k]
+                                     for k in results_df.columns if k.startswith("clusterer_")}
+            }
+
+            if plot_clusters:
+                plt.tight_layout()
+
+        # === Bayesian Optimization Evaluation ===
+        elif evaluation == "bayesian":
+            try:
+                from bayes_opt import BayesianOptimization
+            except ImportError:
+                raise ImportError("Please install the bayesian-optimization package to use bayesian evaluation.")
+
+            # Build numeric search space from union of reducer and clusterer params
+            search_space = {}
+            all_params = {**reducer_params, **clusterer_params}
+            for key, vals in all_params.items():
+                numeric_vals = [float(v) for v in vals]
+                search_space[key] = (min(numeric_vals), max(numeric_vals))
+
+            def objective(**params):
+                # Map continuous parameters to the closest option
+                r_dict = {}
+                c_dict = {}
+                for key, val in params.items():
+                    if key in reducer_params:
+                        r_dict[key] = min(reducer_params[key], key=lambda x: abs(float(x) - val))
+                    elif key in clusterer_params:
+                        c_dict[key] = min(clusterer_params[key], key=lambda x: abs(float(x) - val))
+                temp_obj = copy.deepcopy(self)
+                try:
+                    temp_obj.cluster_data(reducer=reducer, clusterer=clusterer,
+                                          reducer_params=r_dict, clusterer_params=c_dict, verbose=False)
+                except Exception:
+                    return -1e6  # heavy penalty
+                labels = temp_obj.labels
+                valid_clusters = [lab for lab in np.unique(labels) if lab != -1]
+                if len(valid_clusters) < 2:
+                    sil = -1
+                    davies = np.inf
+                    calinski = -1
+                else:
+                    data_used = temp_obj.dims_df.values if temp_obj.dims_df is not None else temp_obj.feats.values
+                    sil = silhouette_score(data_used, labels)
+                    davies = davies_bouldin_score(data_used, labels)
+                    calinski = calinski_harabasz_score(data_used, labels)
+                n_clusters = len(valid_clusters)
+                percent_clustered = np.sum(labels != -1) / len(labels) * 100
+
+                if bayesian_metric == "silhouette":
+                    return sil
+                elif bayesian_metric == "davies":
+                    return -davies
+                elif bayesian_metric == "calinski":
+                    return calinski
+                elif bayesian_metric == "n_clusters":
+                    return n_clusters
+                elif bayesian_metric == "percent_clustered":
+                    return percent_clustered
+                else:  # composite
+                    composite = sil + (1.0 / (davies + 1e-6)) + (calinski / 1000.0) + (percent_clustered / 100) + n_clusters
+                    return composite
+
+            optimizer = BayesianOptimization(
+                f=objective,
+                pbounds=search_space,
+                verbose=2,
+                random_state=42
+            )
+            optimizer.maximize(init_points=5, n_iter=bayesian_iterations)
+
+            best_params_cont = optimizer.max["params"]
+            best_reducer_params = {}
+            best_clusterer_params = {}
+            for key, val in best_params_cont.items():
+                if key in reducer_params:
+                    best_reducer_params[key] = min(reducer_params[key], key=lambda x: abs(float(x) - val))
+                elif key in clusterer_params:
+                    best_clusterer_params[key] = min(clusterer_params[key], key=lambda x: abs(float(x) - val))
+            best_params = {"reducer_params": best_reducer_params, "clusterer_params": best_clusterer_params}
+
+            # Build a simple results dataframe from the Bayesian iterations
+            bayes_results = []
+            for res in optimizer.res:
+                params_used = res["params"]
+                r_dict = {}
+                c_dict = {}
+                for key, val in params_used.items():
+                    if key in reducer_params:
+                        r_dict[key] = min(reducer_params[key], key=lambda x: abs(float(x)-val))
+                    elif key in clusterer_params:
+                        c_dict[key] = min(clusterer_params[key], key=lambda x: abs(float(x)-val))
+                bayes_results.append({
+                    "param_combo": f"Reducer: {r_dict}, Clusterer: {c_dict}",
+                    bayesian_metric: res["target"]
+                })
+            results_df = pd.DataFrame(bayes_results)
+
+        # Save the results dataframe in self for later plotting
+        self.grid_search_results_df = results_df.copy()
+        return best_params, results_df
+
+
+    def plot_grid_search_results(self, metric="composite", ascending=True):
+        """
+        Plot the grid search results stored in self.grid_search_results_df.
+
+        Parameters
+        ----------
+        metric : str or list, optional
+            The metric name(s) to plot. Allowed metrics include:
+            "silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite".
+            If a list is provided, a separate plot is generated for each metric.
+        sort_order : str, optional
+            Sort order for the barplot. Can be "ascending" or "descending".
+
+        Returns
+        -------
+        None
+        """
+        if not hasattr(self, "grid_search_results_df"):
+            raise ValueError("No grid search results found. Run clustering_grid_search() first.")
+
+        df = self.grid_search_results_df.copy()
+        allowed_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+
+        if isinstance(metric, str):
+            if metric not in allowed_metrics:
+                raise ValueError(f"Metric '{metric}' is not among allowed metrics: {allowed_metrics}.")
+            sorted_df = df.sort_values(by=metric, ascending=ascending)
+            plt.figure(figsize=(10, max(6, len(sorted_df) * 0.3)))
+            plt.barh(sorted_df["param_combo"], sorted_df[metric])
+            plt.xlabel(metric)
+            plt.title(f"Grid Search Results - {metric}")
+            plt.tight_layout()
+            plt.show()
+        elif isinstance(metric, list):
+            for met in metric:
+                if met not in allowed_metrics:
+                    raise ValueError(f"Metric '{met}' is not among allowed metrics: {allowed_metrics}.")
+            n = len(metric)
+            fig, axs = plt.subplots(n, 1, figsize=(10, 4 * n))
+            if n == 1:
+                axs = [axs]
+            for ax, met in zip(axs, metric):
+                sorted_df = df.sort_values(by=met, ascending=ascending)
+                ax.barh(sorted_df["param_combo"], sorted_df[met])
+                ax.set_xlabel(met)
+                ax.set_title(f"Grid Search Results - {met}")
+            plt.tight_layout()
+            plt.show()
+        else:
+            raise ValueError("Parameter 'metric' must be a string or a list of strings.")
 
     def plot_dim_reduction(self, dims=(1,2), ax=None, plot3d=False, plot_outliers=True,
                   plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
@@ -559,16 +941,43 @@ class Epochs:
 
 
     # Feature vizualization methods
-    def plot_simple_pca(self,  n_components=2, title='', **kwargs):
+
+    def plot_simple_pca(self, n_components=2, x='PC1', y='PC2', plot_outliers=True, title='PCA',
+                        ax=None, figisize=(4,4), palette='tab10', edgecolor='black', **kwargs):
+                            
         """
-            Perform and plot a simple PCA on features.
+            Perform and visualize PCA.
 
             Parameters:
             -----------
-            n_components : int, optional
-                Number of principal components to use.
-            title : str, optional
+            n_components : int, optional (default=2)
+                Number of principal components to compute.
+            x : str, optional (default='PC1')
+                The principal component to plot on the x-axis.
+            y : str, optional (default='PC2')
+                The principal component to plot on the y-axis.
+            title : str, optional (default='PCA')
                 Title of the plot.
+            ax : matplotlib.axes.Axes, optional (default=None)
+                The axes on which to plot. If None, a new figure and axes will be created.
+            figisize : tuple, optional (default=(4,4))
+                Size of the figure.
+            palette : str or sequence, optional (default='tab10')
+                Colors to use for the different levels of the hue variable.
+            edgecolor : str, optional (default='black')
+                Color of the edge of the points.
+            **kwargs : additional keyword arguments
+                Additional arguments to pass to the PCA constructor.
+            Returns:
+            --------
+            None
+                This function does not return anything. It displays a PCA plot.
+            Notes:
+            ------
+            This function performs Principal Component Analysis (PCA) on the features of the object and 
+            visualizes the first two principal components in a scatter plot. If labels are provided, 
+            they are used to color the points in the plot.
+
         """
 
         pca = PCA(n_components=n_components, **kwargs)
@@ -579,10 +988,15 @@ class Epochs:
         pca_df['label'] = self.labels
         hue = 'label' if self.labels is not None else None
 
+        if not plot_outliers and self.labels is not None:
+            pca_df = pca_df[pca_df['label'] != -1]
+
         # Plot the PCA results
-        fig, ax = plt.subplots(figsize=(4, 4))
-        sns.scatterplot(data=pca_df, x='PC1', y='PC2', hue='label', 
-                        palette='viridis', ax=ax, legend=False, edgecolor='black')
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figisize)
+
+        sns.scatterplot(data=pca_df, x=x, y=y , hue=hue, 
+                        palette=palette, ax=ax, legend=True, edgecolor = edgecolor)
         ax.set_title(title)
 
         if self.labels is not None:
@@ -653,7 +1067,7 @@ class Epochs:
             if ax is None:
                 fig, ax = plt.subplots()
             if self.labels is not None and plot_labels:
-                fig = sns.scatterplot(data=plot_df, x='t-SNE 1', y='t-SNE 2', hue='label', palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                sns.scatterplot(data=plot_df, x='t-SNE 1', y='t-SNE 2', hue='label', ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
                 ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
             else:
                 sns.scatterplot(data=plot_df, x='t-SNE 1', y='t-SNE 2', ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
@@ -662,7 +1076,7 @@ class Epochs:
             return ax  
 
 
-    def plot_umap(self, n_components,reducer_params={}, ax=None, plot3d=False, plot_outliers=True,
+    def plot_umap(self, n_components, reducer_params={}, ax=None, plot3d=False, plot_outliers=True,
                   plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
                   figsize3d = (10, 10), **kwargs):
         """
@@ -677,9 +1091,9 @@ class Epochs:
             3d_plot : bool, optional
                 Whether to create a 3D scatter plot.
         """
-        if 'n_components' in reducer_params:
-            reducer_params.pop('n_components')
-        reducer = umap.UMAP(n_components=n_components, **reducer_params)
+        if 'n_components' not in reducer_params:
+            reducer_params['n_components'] = n_components
+        reducer = umap.UMAP(**reducer_params)
 
         embedding = reducer.fit_transform(self.feats)
 
@@ -691,7 +1105,7 @@ class Epochs:
         if not plot_outliers:
             plot_df = plot_df[plot_df['label'] != -1]
 
-        if plot3d and n_components >= 3:
+        if plot3d and reducer_params['n_components'] >= 3:
             fig = plt.figure(figsize=figsize3d)
             ax = fig.add_subplot(111, projection='3d')
             if self.labels is not None and plot_labels:
@@ -706,13 +1120,12 @@ class Epochs:
             if ax is None:
                 fig, ax = plt.subplots()
             if self.labels is not None and plot_labels:
-                fig = sns.scatterplot(data=plot_df, x='UMAP 1', y='UMAP 2', hue='label', palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
+                sns.scatterplot(data=plot_df, x='UMAP 1', y='UMAP 2', hue='label', ax = ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, legend=True, **kwargs)
                 ax.legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
             else:
                 sns.scatterplot(data=plot_df, x='UMAP 1', y='UMAP 2', ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
             ax.set_xlabel('UMAP 1')
             ax.set_ylabel('UMAP 2')
-            return ax  
 
 
     def plot_feature_correlation(self, threshold=0.8, ax=None, 
@@ -744,6 +1157,17 @@ class Epochs:
     
     def plot_hierarchy(self):
         pass
+
+    def clone(self):
+        """
+            Create a deep copy of the Epochs object.
+
+            Returns:
+            --------
+            Epochs
+                A deep copy of the current Epochs object.
+        """
+        return copy.deepcopy(self)
 
     # I/O methods
     @staticmethod

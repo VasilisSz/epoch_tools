@@ -197,7 +197,8 @@ class ClusterInterpreter:
             plt.show()
     
 
-    def plot_feature_values(self, exclude_features = [], plot_type='violin', palette='tab10', ax=None, figsize=None, display=True, **kwargs):
+    def plot_feature_values(self, exclude_features = [], plot_outliers=True, plot_type='violin', 
+                            palette='tab10', ax=None, figsize=None, display=True, **kwargs):
         """
         Visualize feature distributions for different clusters.
 
@@ -216,8 +217,11 @@ class ClusterInterpreter:
         # Exclude features if specified
         if exclude_features:
             data = data.drop(columns=exclude_features)
+        
+        if not plot_outliers:
+            data = data[data['labels'] != -1]
 
-        melt_df = data.melt(id_vars='labels', value_vars=self.epochs.feats.columns, 
+        melt_df = data.melt(id_vars='labels', value_vars=data.columns, 
                             var_name='Feature', value_name='Value')
         
         n_features = len(data.columns) - 1
@@ -244,7 +248,8 @@ class ClusterInterpreter:
         return ax
 
 
-    def plot_feature_density(self, common_norm=False, exclude_features = [], palette='tab10', figsize=None, display=True, **kwargs):
+    def plot_feature_density(self, common_norm=False, exclude_features = [], plot_outliers=True,
+                             palette='tab10', figsize=None, display=True, **kwargs):
         """
         Plot kernel density estimations for feature distributions across clusters.
 
@@ -265,6 +270,9 @@ class ClusterInterpreter:
         features = data.columns
         n_features = len(features)
         data['labels'] = self.epochs.labels
+
+        if not plot_outliers:
+            data = data[data['labels'] != -1]
     
         nrows, ncols = row_col_layout(n_features)
         figsize = (ncols*3.5, nrows*3.5) if figsize is None else figsize
@@ -273,14 +281,16 @@ class ClusterInterpreter:
 
         for i, feature in enumerate(features):
             sns.kdeplot(data=data, x=feature, hue='labels', ax=ax[i], fill=True,
-                        legend=True,hue_order=np.sort(data['labels'].unique()),
+                        legend=True, hue_order=np.sort(data['labels'].unique()),
                          palette=palette, common_norm=common_norm, **kwargs)
             ax[i].set_title(feature)
-            ax[i].set_xlabel('')
+            ax[i].set_xlabel('Feature Value')
             # Determine row and column of the current subplot
             row, col = divmod(i, ncols)
             if col == ncols - 1:
-                ax[i].legend(loc='upper left', bbox_to_anchor=(1.05, 1), title='Label')
+                handles, labels = ax[i].get_legend_handles_labels()
+                if handles:
+                    ax[i].legend(handles, labels, loc='upper left', bbox_to_anchor=(1.1, 1), title='Label')
             else:
                 # Remove the legend for subplots not in the last column.
                 leg = ax[i].get_legend()
@@ -296,7 +306,7 @@ class ClusterInterpreter:
             plt.show()
 
 
-    def plot_epoch_signal(self, n_epochs=5, channels_to_plot='all', cmap='hls', nstd='auto', display=True):
+    def plot_epoch_signal(self, n_epochs=5, plot_outliers=True, channels_to_plot='all', cmap='hls', nstd='auto', display=True):
         """
         Plot raw EEG signals for epochs from different clusters.
 
@@ -319,6 +329,8 @@ class ClusterInterpreter:
         if channels_to_plot == 'all':
             channels_to_plot = self.epochs.ch_names
         labels = self.epochs.labels
+        if not plot_outliers:
+            labels = labels[labels != -1]
         unique_labels = np.unique(labels)
         n_labels = len(unique_labels)
         if isinstance(cmap, str):
@@ -361,7 +373,8 @@ class ClusterInterpreter:
                         ax_channel.set_ylim(_mean - nstd*_std, _mean + nstd*_std)
 
                     if k == 0:
-                        ax_channel.spines['bottom'].set_visible(False)
+                        if len(channels_to_plot) > 1:
+                            ax_channel.spines['bottom'].set_visible(False)
                         ax_channel.set_xticks([])
                         ax_channel.set_xlabel("")
                     elif k == len(channels_to_plot) - 1:
@@ -413,7 +426,7 @@ class ClusterInterpreter:
 
         # Color labels
         if col_colors == 'labels':
-            unique_labels = np.unique(self.epochs.labels)
+            unique_labels = np.unique(data['Cluster'].unique())
             colors = sns.color_palette("tab10", n_colors=len(unique_labels))
             col_colors = pd.Series(
                 data['Cluster'].map(dict(zip(unique_labels, colors)))
@@ -437,7 +450,7 @@ class ClusterInterpreter:
         else:
             raise ValueError("Invalid col_colors. Must be 'labels' or a pd.Series.")
 
-        sns.clustermap(self.epochs.feats.T,
+        sns.clustermap(data.drop(columns='Cluster').T,
                        method=method,
                        cmap=cmap,
                        row_cluster=row_cluster,
@@ -451,7 +464,6 @@ class ClusterInterpreter:
                    loc='upper left', bbox_to_anchor=(0, 0))
 
         if display:
-            plt.tight_layout()
             plt.show()
 
 
@@ -507,8 +519,15 @@ class ClusterInterpreter:
 
         if cluster is not None:
             cluster_shap_vals = shap_values[:, :, cluster]
+
+            if figsize is None:
+                figsize = (10, 4)
+            fig, axes = plt.subplots(1, 1, figsize=figsize)
+            
+            plt.sca(axes)
             shap.summary_plot(cluster_shap_vals, self.X[:n_samples], plot_type=plot_type, 
                     max_display=max_display, show=False, **kwargs)
+            axes.set_title(f"SHAP Summary - Cluster {cluster}", fontsize=14)
             if display:
                 plt.show()
         else:
@@ -581,7 +600,12 @@ class ClusterInterpreter:
                 raise ValueError(f"Requested cluster={cluster} exceeds the number of clusters={n_clusters}")
             shap_values = shap_values[:, :, cluster]  # shape (n_shap_samples, n_features)
             
+            
+            if figsize is None:
+                figsize = (10, 5)
+            fig, axes = plt.subplots(1, 1, figsize=figsize)
 
+            plt.sca(axes)
             shap.decision_plot(
                 explainer.expected_value[cluster],
                 shap_values[:n_samples],
@@ -591,7 +615,8 @@ class ClusterInterpreter:
                 show=False,  # to allow capturing or customizing the plot
                 **kwargs
             )
-            plt.title(f"SHAP Decision Plot (Cluster {cluster})", fontsize=14)
+            axes.set_title(f"SHAP Decision Plot (Cluster {cluster})", fontsize=14)
+
             plt.tight_layout()
             if display:
                 plt.show()
