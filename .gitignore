@@ -2,4 +2,5 @@
 *.pdf
 tests/
 */test_data/
-
+*.egg-info/
+*TODO.md
