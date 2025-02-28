@@ -11,18 +11,19 @@ def row_col_layout(n, rows=None, cols=None):
         cols (int, optional): Fixed number of columns. Default is None.
 
     Returns:
-        tuple: A tuple (nrows, ncols) representing the number of rows and columns.
+        tuple: A tuple (nrows, ncols) representing 
+        the number of rows and columns.
     """
     if rows is not None and cols is not None:
-        raise ValueError("Only one of `rows` or `cols` can be specified, not both.")
+        raise ValueError(
+            "Only one of `rows` or `cols` can be specified, not both."
+        )
 
     if rows is not None:
-        # Calculate columns needed to fit all `n` plots into the specified number of rows
         cols = math.ceil(n / rows)
         return rows, cols
 
     if cols is not None:
-        # Calculate rows needed to fit all `n` plots into the specified number of columns
         rows = math.ceil(n / cols)
         return rows, cols
 

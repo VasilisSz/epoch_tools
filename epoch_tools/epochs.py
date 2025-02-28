@@ -1,3 +1,5 @@
+from .utils import row_col_layout
+
 import mne
 
 import pandas as pd
@@ -26,13 +28,14 @@ import contextlib
 import copy
 import warnings
 
-warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn.utils.deprecation")
+warnings.filterwarnings("ignore", category=FutureWarning, 
+                        module="sklearn.utils.deprecation")
 warnings.filterwarnings("ignore", category=UserWarning, module="umap")
 
-from .utils import *
 
 class Epochs:
-    def __init__(self, epochs, non_feature_cols=[], animal_id=None, condition=None):
+    def __init__(self, epochs, non_feature_cols=[], 
+                 animal_id=None, condition=None):
         """
             Initialize an Epochs object.
 
@@ -48,17 +51,19 @@ class Epochs:
                 Experimental condition associated with the epochs.
         """
         if not isinstance(epochs, mne.epochs.EpochsFIF):
-            raise ValueError("The provided object must be an instance of mne.Epochs.")
-    
-        
+            raise ValueError(
+                "The provided object must be an instance of mne.Epochs."
+            )
         self.epochs = epochs
         self.sfreq = epochs.info['sfreq']
         self.metadata = epochs.metadata
         self.condition = condition
         self.animal_id = animal_id
         self.non_feature_cols = non_feature_cols
-        self.feature_cols =  [col for col in self.metadata.columns 
-                                  if col not in self.non_feature_cols]
+        self.feature_cols = [
+            col for col in self.metadata.columns if
+            col not in self.non_feature_cols
+        ]
         self.features_subset = None
         self.feats = None
         self.labels = None
@@ -68,8 +73,8 @@ class Epochs:
         self.clusterer = None
         self.reducer_params = None
         self.clusterer_params = None
-    
-        # Clone the MNE Epochs object to inherit its functionality
+
+    # Clone the MNE Epochs object to inherit its functionality
     def __getattr__(self, attr):
         """
             Delegate attribute access to the wrapped mne.Epochs object.
@@ -87,11 +92,14 @@ class Epochs:
         try:
             return getattr(self.epochs, attr)
         except AttributeError:
-            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{attr}'")
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute '{attr}'"
+                )
 
     def __dir__(self):
         """
-            Combine the attributes and methods of Epochs and the wrapped mne.Epochs object.
+            Combine the attributes and methods of Epochs 
+            and the wrapped mne.Epochs object.
 
             Returns:
             --------
@@ -109,12 +117,13 @@ class Epochs:
     def __getstate__(self):
         """Prepare the object’s state for pickling."""
         state = self.__dict__.copy()
-        # Instead of pickling the MNE epochs object, we save it to a temporary file
+        # We save it to a temporary file
         # and store the file’s binary content.
-        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif',
+                                         delete=False) as tmp:
             tmp_name = tmp.name
-        # Save using MNE’s built-in method (which includes internal compression)
-        with open(os.devnull, 'w') as fnull: #mute the Overwriting existing file info message
+        # Save using MNE built-in method (which includes internal compression)
+        with open(os.devnull, 'w') as fnull:  # mute the Overwriting warning
             with contextlib.redirect_stdout(fnull):
                 self.epochs.save(tmp_name, overwrite=True)
         # Read the saved file into bytes
@@ -130,7 +139,8 @@ class Epochs:
         """Restore the object’s state from the pickled state."""
         # Extract the saved bytes and write them back to a temporary file.
         epochs_bytes = state.pop('epochs_bytes')
-        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif', delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix='-mne-epo.fif',
+                                         delete=False) as tmp:
             tmp_name = tmp.name
             tmp.write(epochs_bytes)
         # Re-load the MNE epochs object
@@ -138,7 +148,6 @@ class Epochs:
         os.remove(tmp_name)
         # Update the instance dictionary with the remaining state
         self.__dict__.update(state)
-    
 
     def __getitem__(self, item):
         """
@@ -169,26 +178,38 @@ class Epochs:
         if self.labels is not None:
             new.labels = self.labels[item]
         return new
+
     def __deepcopy__(self, memo):
         # Create a new instance with a copied MNE Epochs
         new_instance = self.__class__(
-            self.epochs.copy(),  # Use MNE's own copy method for the underlying object
+            self.epochs.copy(),
             non_feature_cols=copy.deepcopy(self.non_feature_cols, memo),
             animal_id=self.animal_id,
             condition=self.condition,
         )
-        new_instance.metadata = self.metadata.copy() if self.metadata is not None else None
-        new_instance.features_subset = copy.deepcopy(self.features_subset, memo)
-        new_instance.feats = self.feats.copy() if self.feats is not None else None
-        new_instance.labels = self.labels.copy() if self.labels is not None else None
+        new_instance.metadata = (
+            self.metadata.copy() if self.metadata is not None else None
+        )
+        new_instance.features_subset = (
+            copy.deepcopy(self.features_subset, memo)
+        )
+        new_instance.feats = (
+            self.feats.copy() if self.feats is not None else None
+        )
+        new_instance.labels = (
+            self.labels.copy() if self.labels is not None else None
+        )
         new_instance.dims = self.dims
-        new_instance.dims_df = self.dims_df.copy() if self.dims_df is not None else None
+        new_instance.dims_df = (
+            self.dims_df.copy() if self.dims_df is not None else None
+        )
         new_instance.reducer = copy.deepcopy(self.reducer, memo)
         new_instance.clusterer = copy.deepcopy(self.clusterer, memo)
         new_instance.reducer_params = copy.deepcopy(self.reducer_params, memo)
-        new_instance.clusterer_params = copy.deepcopy(self.clusterer_params, memo)
+        new_instance.clusterer_params = (
+            copy.deepcopy(self.clusterer_params, memo)
+        )
         return new_instance
-    
     # Feature selection methods
 
     def create_feature_subset(self, features=None, ch_names=None):
@@ -203,13 +224,14 @@ class Epochs:
             ch_names : list or dict, optional
                 Channel names to filter features by.
         """
-        
+
         if features:
             assert isinstance(features, list)
             self.features_subset = features
         else:
             if ch_names:
-                cols = [col for col in self.feature_cols if any(ch_name in col for ch_name in ch_names)]
+                cols = [col for col in self.feature_cols if
+                        any(ch_name in col for ch_name in ch_names)]
             else:
                 cols = self.feature_cols
             column_selector = widgets.SelectMultiple(
@@ -220,6 +242,7 @@ class Epochs:
                     )
             button = widgets.Button(description="Select Feature Subset")
             display(column_selector, button)
+
             def callback(b):
                 self.features_subset = list(column_selector.value)
                 print("Feature Subset Set")
@@ -239,7 +262,8 @@ class Epochs:
         """
         return self.metadata[self.feature_cols]
     
-    def get_features(self, scaler='standard', dropna=True, ch_names = None, as_array=False):
+    def get_features(self, scaler='standard', dropna=True,
+                     ch_names=None, as_array=False):
         """
             Extract features from the metadata with optional scaling.
 
@@ -259,13 +283,13 @@ class Epochs:
             pd.DataFrame or np.ndarray
                 The processed feature data.
         """
-        
+
         feats = self.metadata.copy()
 
         if dropna:
             feats = feats.dropna()
             self.feats_idx = feats.index
-            
+
         # Selecting features subset
         if self.features_subset:
             feats = feats[self.features_subset]
@@ -274,27 +298,34 @@ class Epochs:
 
         if ch_names:
             if isinstance(ch_names, dict):
-                feats = feats[[col for col in feats.columns if any(ch_name in col for ch_name in ch_names)]]
-                #rename 
+                feats = feats[[col for col in feats.columns if
+                               any(ch_name in col for ch_name in ch_names)]]
+                # rename
                 for old_name, new_name in ch_names.items():
-                    feats.columns = feats.columns.str.replace(old_name, new_name, regex=False)
+                    feats.columns = feats.columns.str.replace(
+                        old_name, new_name, regex=False)
             elif isinstance(ch_names, list):
-                feats = feats[[col for col in feats.columns if any(ch_name in col for ch_name in ch_names)]]
+                feats = feats[[col for col in feats.columns if
+                               any(ch_name in col for ch_name in ch_names)]]
             else:
-                raise ValueError("""ch_names must be a dictionary [channel_name]:[channel_rename]
-                                 or a list [channel_names].""")
-            
+                raise ValueError("ch_names must be a dictionary" +
+                                 "[channel_name]:[channel_rename]" +
+                                 "or a list [channel_names].")
+
         if scaler == 'minmax':
             scaler = MinMaxScaler()
-            feats = pd.DataFrame(scaler.fit_transform(feats), columns=feats.columns, index=feats.index)
+            feats = pd.DataFrame(scaler.fit_transform(feats),
+                                 columns=feats.columns, index=feats.index)
         elif scaler == 'standard':
             scaler = StandardScaler()
-            feats = pd.DataFrame(scaler.fit_transform(feats), columns=feats.columns, index=feats.index)
+            feats = pd.DataFrame(scaler.fit_transform(feats),
+                                 columns=feats.columns, index=feats.index)
         elif scaler is None:
             pass  # No scaling applied
         else:
-            raise ValueError("Invalid scaler. Provide a callable scaler or one of ['minmax', 'standard', None].")
-        
+            raise ValueError("Invalid scaler. Provide a callable" +
+                             "scaler or one of ['minmax', 'standard', None].")
+
         # Set current features
         self.feats = feats
 
@@ -302,9 +333,8 @@ class Epochs:
             return feats.to_numpy()
         else:
             return feats
-    
+
     # Epoch analysis
-    
     def plot_epoch(self, idx=None, channels='all'):
         """
             Plot the signal of a specific epoch.
@@ -316,7 +346,8 @@ class Epochs:
             channels : list or 'all', optional
                 Channels to plot. Defaults to all channels.
         """
-        idx = np.random.choice(self.epochs.metadata.index) if idx is None else idx
+        if idx is None:
+            idx = np.random.choice(self.epochs.metadata.index)
 
         if channels == 'all':
             n_channels = len(self.epochs.ch_names)
@@ -324,17 +355,23 @@ class Epochs:
         else:
             assert isinstance(channels, list)
             n_channels = len(channels)
-        
+
         fig, ax = plt.subplots(n_channels, 1, figsize=(12, 2*n_channels))
-        fig.suptitle(f"Epoch {idx} - ID: {self.animal_id} - Condition: {self.condition}", y=1.000005, fontsize=14)
+        fig.suptitle(
+            f"Epoch {idx}-ID: {self.animal_id}-Condition: {self.condition}",
+            y=1.000005,
+            fontsize=14
+        )
         ax = [ax] if n_channels == 1 else ax
         for i, ch in enumerate(channels):
-            ax[i].plot(self.epochs.get_data(picks=ch)[idx, :, :].T, color='black', alpha=0.85)
+            ax[i].plot(self.epochs.get_data(picks=ch)[idx, :, :].T,
+                       color='black', alpha=0.85)
             ax[i].set_title(ch)
 
         plt.tight_layout()
 
-    def compute_psd_(self, channels='all', fmin=0, fmax=100, epoch_idx = None,**kwargs):
+    def compute_psd_(self, channels='all', fmin=0, fmax=100,
+                     epoch_idx=None, **kwargs):
         """
             Compute the power spectral density (PSD) of the epochs.
 
@@ -356,16 +393,19 @@ class Epochs:
         """
         if epoch_idx is None:
             psd, freq = mne.time_frequency.psd_array_multitaper(
-                self.epochs.get_data(picks=channels), sfreq=self.sfreq, fmin=fmin, fmax=fmax, **kwargs
+                self.epochs.get_data(picks=channels), sfreq=self.sfreq,
+                fmin=fmin, fmax=fmax, **kwargs
             )
         else:
             psd, freq = mne.time_frequency.psd_array_multitaper(
-                self.epochs.get_data(picks=channels)[epoch_idx], sfreq=self.sfreq, fmin=fmin, fmax=fmax, **kwargs
+                self.epochs.get_data(picks=channels)[epoch_idx],
+                sfreq=self.sfreq, fmin=fmin, fmax=fmax, **kwargs
             )
         return psd, freq
-    
-    def plot_psd_(self, channels='all', fmin=0, fmax=100, 
-                  log=True, norm=False, err_method='sd', epoch_idx = None, **kwargs):
+
+    def plot_psd_(self, channels='all', fmin=0, fmax=100,
+                  log=True, norm=False, err_method='sd',
+                  epoch_idx=None, **kwargs):
         """
             Plot the power spectral density (PSD) of the epochs.
 
@@ -386,7 +426,7 @@ class Epochs:
             epoch_idx : int, optional
                 Specific epoch index to plot PSD for.
         """
-        
+
         freq_bands = {
             r'$\delta$': (1, 4),  # Delta
             r'$\theta$': (4, 8),  # Theta
@@ -395,7 +435,6 @@ class Epochs:
             r'$\gamma$': (30, 100)  # Gamma
         }
 
-
         if channels == 'all':
             n_channels = len(self.epochs.ch_names)
             channels = self.epochs.ch_names
@@ -403,7 +442,8 @@ class Epochs:
             assert isinstance(channels, list)
             n_channels = len(channels)
 
-        psd, freq = self.compute_psd_(channels, fmin, fmax, epoch_idx=epoch_idx, **kwargs)
+        psd, freq = self.compute_psd_(channels, fmin, fmax,
+                                      epoch_idx=epoch_idx, **kwargs)
 
         if norm:
             psd /= np.sum(psd)
@@ -415,24 +455,30 @@ class Epochs:
         elif err_method == "ci":
             err = np.std(psd, axis=0)
             err = 1.96 * err / np.sqrt(psd.shape[0])
-        elif err_method == None:
+        elif err_method is None:
             err = None
         else:
-            raise ValueError("Invalid error method. Provide one of ['sd', 'sem', 'ci', 'none'].")
-
+            raise ValueError(
+                "Invalid error method. Provide one of "
+                "['sd', 'sem', 'ci', 'none']."
+            )
 
         nrows, ncols = row_col_layout(n_channels)
-        fig, ax = plt.subplots(ncols=ncols, nrows=nrows, figsize=(4*ncols, 4*nrows))
-        
-        fig.suptitle(f"PSD - ID: {self.animal_id} - Condition: {self.condition}\nEpoch {epoch_idx}",
-                      y=1.000005, fontsize=14)
+        fig, ax = plt.subplots(ncols=ncols, nrows=nrows, 
+                               figsize=(4*ncols, 4*nrows))
+
+        fig.suptitle(
+            f"ID:{self.animal_id}-Condition:{self.condition}-Epoch{epoch_idx}",
+            y=1.000005,
+            fontsize=14
+        )
         ax = [ax] if n_channels == 1 else ax.ravel()
-        
+
         for i, ch in enumerate(channels):
             if epoch_idx is None:
                 _psd = np.mean(psd[:, i, :], axis=0)
             else:
-                _psd = psd[i , :]
+                _psd = psd[i, :]
                 err = None
 
             ax[i].plot(freq, _psd, color='black', alpha=0.85)
@@ -442,14 +488,12 @@ class Epochs:
             if log:
                 ax[i].set_yscale('log')
             if err is not None:
-                ax[i].fill_between(freq, _psd - err[i, :],  _psd + err[i, :], color='black', alpha=0.2)
+                ax[i].fill_between(freq, _psd - err[i, :],  _psd + err[i, :],
+                                   color='black', alpha=0.2)
             for band, (fmin_, fmax_) in freq_bands.items():
                 # vertical lines for frequency bands
                 ax[i].axvline(fmin_, color='black', linestyle='--', alpha=0.1)
                 ax[i].axvline(fmax_, color='black', linestyle='--', alpha=0.1)
-                # text for frequency bands
-                # ax[i].text((fmin_ + fmax_) / 2, ax[i].get_ylim()[1] * 1.01, band, 
-                #            horizontalalignment='center', verticalalignment='top', fontsize=10, color='black')
         plt.tight_layout()
 
     # Clustering methods
@@ -462,7 +506,8 @@ class Epochs:
         verbose=True
     ):
         """
-            Clusters data based on an optional dimensionality reducer and a chosen clustering algorithm.
+            Clusters data based on an optional dimensionality reducer
+            and a chosen clustering algorithm.
 
             TODO: Make it also a standalone method
 
@@ -471,13 +516,15 @@ class Epochs:
             data : pd.DataFrame or np.ndarray
                 Already scaled feature data. Shape = [n_samples, n_features].
             reducer : str or None, optional
-                Which dimensionality reducer to use ('umap', 'pca', 't-sne' or None).
+                Which dimensionality reducer to use
+                ('umap', 'pca', 't-sne' or None).
                 If None, no dimensionality reduction is applied.
             clusterer : str, optional
                 Which clustering algorithm to use ('kmeans' or 'hdbscan').
             reducer_params : dict, optional
                 Dictionary of hyperparameters for the reducer.
-                Example for UMAP: {"n_neighbors": 15, "min_dist": 0.1, "n_components": 2, "random_state": 42}
+                Example for UMAP: {"n_neighbors": 15, "min_dist": 0.1,
+                                    "n_components": 2, "random_state": 42}
             clusterer_params : dict, optional
                 Dictionary of hyperparameters for the clusterer.
                 Example for KMeans: {"n_clusters": 5, "random_state": 42}
@@ -497,8 +544,6 @@ class Epochs:
         if clusterer_params is None:
             clusterer_params = {}
             print("No clusterer parameters provided. Using default values.")
-    
-
 
         # 1. Dimensionality Reduction (if applied)
         if reducer == 'umap':
@@ -516,7 +561,9 @@ class Epochs:
         else:
             data_reduced = data
         self.dims = data_reduced.shape[1]
-        self.dims_df = pd.DataFrame(data_reduced, columns=[f'dim{i+1}' for i in range(self.dims)])
+        self.dims_df = pd.DataFrame(
+            data_reduced, columns=[f'dim{i+1}' for i in range(self.dims)]
+            )
 
         # 2. Clustering
         if clusterer == 'kmeans':
@@ -528,8 +575,9 @@ class Epochs:
             labels = self.clusterer.fit_predict(data_reduced)
 
         else:
-            raise ValueError("Unsupported clustering method. Choose from 'kmeans' or 'hdbscan'.")
-        
+            raise ValueError("Unsupported clustering method."
+                             "Choose from 'kmeans' or 'hdbscan'.")
+
         self.reducer_params = copy.deepcopy(reducer_params) if len(reducer_params) == 0 else copy.deepcopy(self.reducer.get_params())
         self.clusterer_params = copy.deepcopy(clusterer_params) if len(clusterer_params) == 0 else copy.deepcopy(self.clusterer.get_params())
 
@@ -537,7 +585,7 @@ class Epochs:
         if verbose:
             print("Number of clusters:", len(np.unique(labels)))
             print(f"Percentage of clustered points: {np.sum(labels != -1) / len(labels) * 100}")
-        
+
         self.labels = labels
 
     def clustering_grid_search(self, reducer, clusterer,
@@ -547,40 +595,50 @@ class Epochs:
                                best_criterion="composite",
                                bayesian_iterations=25,
                                plot_clusters=False,
-                               random_seed = 42):
+                               random_seed=42):
         """
         Perform a grid search over different clustering hyperparameters.
 
         Parameters
         ----------
         reducer : str or None
-            The dimensionality reducer to use (e.g. 'umap', 'pca', 't-sne' or None).
+            The dimensionality reducer to use 
+            (e.g. 'umap', 'pca', 't-sne' or None).
         clusterer : str
             The clustering algorithm to use ('kmeans' or 'hdbscan').
         reducer_params : dict
-            Dictionary where each key is a reducer parameter name and its value is a list of options.
+            Dictionary where each key is a reducer parameter name
+            and its value is a list of options.
         clusterer_params : dict
-            Dictionary where each key is a clusterer parameter name and its value is a list of options.
+            Dictionary where each key is a clusterer parameter name
+            and its value is a list of options.
         evaluation : {"metrics", "bayesian"}, optional
             Which evaluation strategy to use.
-            - "metrics": try every parameter combination and evaluate with several clustering metrics.
+            - "metrics": try every parameter combination and
+                        evaluate with several clustering metrics.
             - "bayesian": use Bayesian optimization (numeric parameters only).
         bayesian_metric : str, optional
-            For bayesian evaluation: which metric to optimize. Options include "silhouette",
-            "davies", "calinski", "n_clusters", "percent_clustered", or "composite". Default is "composite".
+            For bayesian evaluation: which metric to optimize.
+            Options include "silhouette","davies", "calinski",
+            "n_clusters", "percent_clustered", or "composite".
+            Default is "composite".
         best_criterion : str, optional
             Which metric to use for selecting the best parameter combination.
-            Options: "silhouette", "davies", "calinski", "n_clusters", "percent_clustered", or "composite".
+            Options: "silhouette", "davies", "calinski", "n_clusters",
+            "percent_clustered", or "composite".
         bayesian_iterations : int, optional
-            Number of Bayesian optimization iterations (only used if evaluation=="bayesian").
+            Number of Bayesian optimization iterations
+            (only used if evaluation=="bayesian").
 
         Returns
         -------
         best_params : dict
-            A dictionary with keys "reducer_params" and "clusterer_params" for the best-found combination.
+            A dictionary with keys "reducer_params" and "clusterer_params"
+            for the best-found combination.
         """
         import itertools
-        from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
+        from sklearn.metrics import silhouette_score, davies_bouldin_score, \
+            calinski_harabasz_score
 
         # Set random seed for reproducibility
         np.random.seed(random_seed)
@@ -595,25 +653,35 @@ class Epochs:
             raise ValueError("clusterer_params must be a dictionary.")
         for key, val in reducer_params.items():
             if not isinstance(val, list) or len(val) == 0:
-                raise ValueError(f"Reducer parameter '{key}' must be a non-empty list.")
+                raise ValueError(f"Reducer parameter '{key}'"
+                                    "must be a non-empty list.")
         for key, val in clusterer_params.items():
             if not isinstance(val, list) or len(val) == 0:
-                raise ValueError(f"Clusterer parameter '{key}' must be a non-empty list.")
+                raise ValueError(f"Clusterer parameter '{key}'"
+                                    "must be a non-empty list.")
 
         if evaluation not in ["metrics", "bayesian"]:
-            raise ValueError("evaluation must be either 'metrics' or 'bayesian'.")
+            raise ValueError("evaluation must be either"
+                             "'metrics' or 'bayesian'.")
         if reducer is not None and reducer not in ["umap", "pca", "t-sne"]:
-            raise ValueError("Reducer must be one of ['umap', 'pca', 't-sne'] or None.")
+            raise ValueError("Reducer must be one of ['umap', 'pca', 't-sne']"
+                             "or None.")
         if clusterer not in ["kmeans", "hdbscan"]:
             raise ValueError("Clusterer must be one of ['kmeans', 'hdbscan'].")
 
-        allowed_bayesian_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+        allowed_bayesian_metrics = ["silhouette", "davies", "calinski",
+                                    "n_clusters", "percent_clustered",
+                                    "composite"]
         if bayesian_metric not in allowed_bayesian_metrics:
-            raise ValueError(f"bayesian_metric must be one of {allowed_bayesian_metrics}.")
+            raise ValueError("bayesian_metric must be one of"
+                             f"{allowed_bayesian_metrics}.")
 
-        allowed_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+        allowed_metrics = ["silhouette", "davies", "calinski", "n_clusters",
+                           "percent_clustered", "composite"]
         if best_criterion not in allowed_metrics:
-            print(f"Warning: best_criterion '{best_criterion}' not in allowed metrics. Defaulting to 'composite'.\nOr select from: {allowed_metrics}")
+            print(f"""Warning: best_criterion '{best_criterion}' not allowed.
+                  Defaulting to 'composite'. Or select from:
+                  {allowed_metrics}""")
             best_criterion = "composite"
 
         if evaluation == "bayesian":
@@ -624,20 +692,27 @@ class Epochs:
                         try:
                             float(v)
                         except Exception:
-                            raise ValueError(f"Bayesian evaluation requires numeric values for parameter '{key}', got value {v}.")
+                            raise ValueError(
+                                "Bayesian evaluation requires numeric values"
+                                f"for parameter '{key}', got value {v}.")
 
         # === Grid Search Evaluation ===
         if evaluation == "metrics":
             results = []
             # Create all parameter combinations
             reducer_keys = list(reducer_params.keys())
-            reducer_combos = list(itertools.product(*[reducer_params[k] for k in reducer_keys]))
+            reducer_combos = list(itertools.product(*[reducer_params[k] for
+                                                      k in reducer_keys]))
             clusterer_keys = list(clusterer_params.keys())
-            clusterer_combos = list(itertools.product(*[clusterer_params[k] for k in clusterer_keys]))
+            clusterer_combos = list(itertools.product(*[clusterer_params[k] for
+                                                        k in clusterer_keys]))
 
             # Initialize a plotting figure
             if plot_clusters:
-                fig, ax = plt.subplots(len(reducer_combos), len(clusterer_combos), figsize=(5*len(clusterer_combos), 3.5*len(reducer_combos)))
+                fig, ax = plt.subplots(len(reducer_combos),
+                                       len(clusterer_combos),
+                                       figsize=(5*len(clusterer_combos),
+                                                3.5*len(reducer_combos)))
 
                 # fix if axes has only 1 dimension
                 if len(reducer_combos) == 1:
@@ -646,41 +721,50 @@ class Epochs:
                     ax = ax[:, np.newaxis]
 
             # Iterate over all combinations
-            with tqdm(total=len(reducer_combos) * len(clusterer_combos), desc="Grid Search") as pbar:
+            with tqdm(total=len(reducer_combos) * len(clusterer_combos),
+                      desc="Grid Search") as pbar:
                 for i, r_combo in enumerate(reducer_combos):
                     r_dict = dict(zip(reducer_keys, r_combo))
                     for j, c_combo in enumerate(clusterer_combos):
                         c_dict = dict(zip(clusterer_keys, c_combo))
-                        # Use deepcopy so that clustering does not alter the original object
+
                         temp_obj = copy.deepcopy(self)
                         try:
-                            temp_obj.cluster_data(reducer=reducer, clusterer=clusterer,
-                                                reducer_params={**r_dict, 'random_state': random_seed}, 
-                                                clusterer_params=c_dict, 
-                                                verbose=False)
+                            temp_obj.cluster_data(reducer=reducer,
+                                                  clusterer=clusterer,
+                                                  reducer_params={
+                                                    **r_dict,
+                                                    'random_state': random_seed},
+                                                  clusterer_params=c_dict,
+                                                  verbose=False)
                         except Exception as e:
-                            print(f"Combination Reducer:{r_dict} & Clusterer:{c_dict} failed: {e}")
+                            print(f"Combination Reducer:{r_dict} &"
+                                  f"Clusterer:{c_dict} failed: {e}")
                             continue
 
                         labels = temp_obj.labels
-                        valid_clusters = [lab for lab in np.unique(labels) if lab != -1]
+                        valid_clusters = [lab for lab in np.unique(labels) if
+                                          lab != -1]
                         if len(valid_clusters) < 2:
                             sil = -1
                             davies = np.inf
                             calinski = -1
                         else:
-                            data_used = temp_obj.dims_df.values if temp_obj.dims_df is not None else temp_obj.feats.values
+                            data_used = temp_obj.dims_df.values if \
+                                temp_obj.dims_df is not None else \
+                                temp_obj.feats.values
                             sil = silhouette_score(data_used, labels)
                             davies = davies_bouldin_score(data_used, labels)
                             calinski = calinski_harabasz_score(data_used, labels)
 
                         n_clusters = len(valid_clusters)
-                        percent_clustered = np.sum(labels != -1) / len(labels) * 100
+                        percent_clustered = np.sum(
+                            labels != -1) / len(labels) * 100
 
                         results.append({
                             **{f"reducer_{k}": v for k, v in r_dict.items()},
                             **{f"clusterer_{k}": v for k, v in c_dict.items()},
-                            "param_combo": f"Reducer: {r_dict}, Clusterer: {c_dict}",
+                            "param_combo": f"Reducer:{r_dict}, Clusterer:{c_dict}",
                             "silhouette": sil,
                             "davies": davies,
                             "calinski": calinski,
@@ -689,19 +773,28 @@ class Epochs:
                         })
 
                         if plot_clusters:
-                            temp_obj.plot_umap(n_components = 2, # doesn't matter
-                                            ax=ax[i, j],
-                                            reducer_params={**r_dict, "random_state": random_seed}, palette="Set2")
-                            # add a textbox with the current reducer/clusterer combo
-                            reducer_text = "\n".join([f"{k}: {v}" for k, v in r_dict.items()])
-                            clusterer_text = "\n".join([f"{k}: {v}" for k, v in c_dict.items()])
-                            textbox = f"Reducer:\n{reducer_text}\nClusterer:\n{clusterer_text}"
+                            temp_obj.plot_umap(n_components=2,
+                                               ax=ax[i, j],
+                                               reducer_params={
+                                                   **r_dict,
+                                                   "random_state": random_seed},
+                                               palette="Set2")
+
+                            reducer_text = "\n".join([f"{k}: {v}" for
+                                                      k, v in r_dict.items()])
+                            clusterer_text = "\n".join([f"{k}: {v}" for
+                                                        k, v in c_dict.items()])
+
+                            textbox = f"""Reducer:\n{reducer_text}\n
+                                        Clusterer:\n{clusterer_text}"""
+
                             ax[i, j].text(1.05, 0.025, textbox,
-                                        transform=ax[i, j].transAxes, fontsize=8,
-                                        verticalalignment='bottom',
-                                        horizontalalignment='left',
-                                        bbox=dict(facecolor='white', alpha=0.7),
-                                        )
+                                          transform=ax[i, j].transAxes,
+                                          fontsize=8,
+                                          verticalalignment='bottom',
+                                          horizontalalignment='left',
+                                          bbox=dict(facecolor='white', alpha=0.7)
+                                          )
                         pbar.update(1)
 
             results_df = pd.DataFrame(results)
@@ -710,18 +803,22 @@ class Epochs:
                 return None, None
 
             # Normalize metrics for composite score (for metrics where higher is better)
-            for metric in ["silhouette", "calinski", "n_clusters", "percent_clustered"]:
+            for metric in ["silhouette", "calinski", 
+                           "n_clusters", "percent_clustered"]:
                 mn = results_df[metric].min()
                 mx = results_df[metric].max()
                 if mx - mn != 0:
-                    results_df[f"norm_{metric}"] = (results_df[metric] - mn) / (mx - mn)
+                    results_df[f"norm_{metric}"] = (
+                        results_df[metric] - mn) / (mx - mn
+                                                    )
                 else:
                     results_df[f"norm_{metric}"] = 0
             # For Davies–Bouldin, lower is better so invert the normalization
             mn = results_df["davies"].min()
             mx = results_df["davies"].max()
             if mx - mn != 0:
-                results_df["norm_davies"] = (mx - results_df["davies"]) / (mx - mn)
+                results_df["norm_davies"] = (
+                    mx - results_df["davies"]) / (mx - mn)
             else:
                 results_df["norm_davies"] = 0
 
@@ -747,10 +844,7 @@ class Epochs:
 
         # === Bayesian Optimization Evaluation ===
         elif evaluation == "bayesian":
-            try:
-                from bayes_opt import BayesianOptimization
-            except ImportError:
-                raise ImportError("Please install the bayesian-optimization package to use bayesian evaluation.")
+            from bayes_opt import BayesianOptimization
 
             # Build numeric search space from union of reducer and clusterer params
             search_space = {}
@@ -765,15 +859,21 @@ class Epochs:
                 c_dict = {}
                 for key, val in params.items():
                     if key in reducer_params:
-                        r_dict[key] = min(reducer_params[key], key=lambda x: abs(float(x) - val))
+                        r_dict[key] = min(reducer_params[key],
+                                          key=lambda x: abs(float(x) - val))
                     elif key in clusterer_params:
-                        c_dict[key] = min(clusterer_params[key], key=lambda x: abs(float(x) - val))
+                        c_dict[key] = min(clusterer_params[key],
+                                          key=lambda x: abs(float(x) - val))
                 temp_obj = copy.deepcopy(self)
                 try:
-                    temp_obj.cluster_data(reducer=reducer, clusterer=clusterer,
-                                          reducer_params=r_dict, clusterer_params=c_dict, verbose=False)
+                    temp_obj.cluster_data(reducer=reducer,
+                                          clusterer=clusterer,
+                                          reducer_params=r_dict,
+                                          clusterer_params=c_dict,
+                                          verbose=False)
                 except Exception:
                     return -1e6  # heavy penalty
+
                 labels = temp_obj.labels
                 valid_clusters = [lab for lab in np.unique(labels) if lab != -1]
                 if len(valid_clusters) < 2:
@@ -781,10 +881,13 @@ class Epochs:
                     davies = np.inf
                     calinski = -1
                 else:
-                    data_used = temp_obj.dims_df.values if temp_obj.dims_df is not None else temp_obj.feats.values
+                    data_used = temp_obj.dims_df.values if \
+                        temp_obj.dims_df is not None else \
+                        temp_obj.feats.values
                     sil = silhouette_score(data_used, labels)
                     davies = davies_bouldin_score(data_used, labels)
                     calinski = calinski_harabasz_score(data_used, labels)
+
                 n_clusters = len(valid_clusters)
                 percent_clustered = np.sum(labels != -1) / len(labels) * 100
 
@@ -799,7 +902,10 @@ class Epochs:
                 elif bayesian_metric == "percent_clustered":
                     return percent_clustered
                 else:  # composite
-                    composite = sil + (1.0 / (davies + 1e-6)) + (calinski / 1000.0) + (percent_clustered / 100) + n_clusters
+                    composite = sil + (1.0 / (davies + 1e-6))
+                    + (calinski / 1000.0)
+                    + (percent_clustered / 100) 
+                    + n_clusters
                     return composite
 
             optimizer = BayesianOptimization(
@@ -815,10 +921,13 @@ class Epochs:
             best_clusterer_params = {}
             for key, val in best_params_cont.items():
                 if key in reducer_params:
-                    best_reducer_params[key] = min(reducer_params[key], key=lambda x: abs(float(x) - val))
+                    best_reducer_params[key] = min(reducer_params[key],
+                                                   key=lambda x: abs(float(x) - val))
                 elif key in clusterer_params:
-                    best_clusterer_params[key] = min(clusterer_params[key], key=lambda x: abs(float(x) - val))
-            best_params = {"reducer_params": best_reducer_params, "clusterer_params": best_clusterer_params}
+                    best_clusterer_params[key] = min(clusterer_params[key],
+                                                     key=lambda x: abs(float(x) - val))
+            best_params = {"reducer_params": best_reducer_params,
+                           "clusterer_params": best_clusterer_params}
 
             # Build a simple results dataframe from the Bayesian iterations
             bayes_results = []
@@ -828,9 +937,11 @@ class Epochs:
                 c_dict = {}
                 for key, val in params_used.items():
                     if key in reducer_params:
-                        r_dict[key] = min(reducer_params[key], key=lambda x: abs(float(x)-val))
+                        r_dict[key] = min(reducer_params[key],
+                                          key=lambda x: abs(float(x)-val))
                     elif key in clusterer_params:
-                        c_dict[key] = min(clusterer_params[key], key=lambda x: abs(float(x)-val))
+                        c_dict[key] = min(clusterer_params[key],
+                                          key=lambda x: abs(float(x)-val))
                 bayes_results.append({
                     "param_combo": f"Reducer: {r_dict}, Clusterer: {c_dict}",
                     bayesian_metric: res["target"]
@@ -841,7 +952,6 @@ class Epochs:
         self.grid_search_results_df = results_df.copy()
         return best_params, results_df
 
-
     def plot_grid_search_results(self, metric="composite", ascending=True):
         """
         Plot the grid search results stored in self.grid_search_results_df.
@@ -850,7 +960,8 @@ class Epochs:
         ----------
         metric : str or list, optional
             The metric name(s) to plot. Allowed metrics include:
-            "silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite".
+            "silhouette", "davies", "calinski", "n_clusters",
+            "percent_clustered", "composite".
             If a list is provided, a separate plot is generated for each metric.
         sort_order : str, optional
             Sort order for the barplot. Can be "ascending" or "descending".
@@ -860,14 +971,17 @@ class Epochs:
         None
         """
         if not hasattr(self, "grid_search_results_df"):
-            raise ValueError("No grid search results found. Run clustering_grid_search() first.")
+            raise ValueError("No grid search results found."
+                             "Run clustering_grid_search() first.")
 
         df = self.grid_search_results_df.copy()
-        allowed_metrics = ["silhouette", "davies", "calinski", "n_clusters", "percent_clustered", "composite"]
+        allowed_metrics = ["silhouette", "davies", "calinski",
+                           "n_clusters", "percent_clustered", "composite"]
 
         if isinstance(metric, str):
             if metric not in allowed_metrics:
-                raise ValueError(f"Metric '{metric}' is not among allowed metrics: {allowed_metrics}.")
+                raise ValueError(f"Metric '{metric}' is not among allowed"
+                                 f"metrics: {allowed_metrics}.")
             sorted_df = df.sort_values(by=metric, ascending=ascending)
             plt.figure(figsize=(10, max(6, len(sorted_df) * 0.3)))
             plt.barh(sorted_df["param_combo"], sorted_df[metric])
@@ -878,7 +992,8 @@ class Epochs:
         elif isinstance(metric, list):
             for met in metric:
                 if met not in allowed_metrics:
-                    raise ValueError(f"Metric '{met}' is not among allowed metrics: {allowed_metrics}.")
+                    raise ValueError(f"Metric '{met}' is not among allowed"
+                                     f"metrics: {allowed_metrics}.")
             n = len(metric)
             fig, axs = plt.subplots(n, 1, figsize=(10, 4 * n))
             if n == 1:
@@ -891,16 +1006,20 @@ class Epochs:
             plt.tight_layout()
             plt.show()
         else:
-            raise ValueError("Parameter 'metric' must be a string or a list of strings.")
+            raise ValueError("Parameter 'metric' must be a string or"
+                             "a list of strings.")
 
-    def plot_dim_reduction(self, dims=(1,2), ax=None, plot3d=False, plot_outliers=True,
-                  plot_labels=True, palette='tab10', edgecolor='black', s=10, alpha=0.5, 
-                  figsize3d = (10, 10), **kwargs):
+    def plot_dim_reduction(self, dims=(1, 2), ax=None, plot3d=False,
+                           plot_outliers=True, plot_labels=True,
+                           palette='tab10', edgecolor='black',
+                           s=10, alpha=0.5, figsize3d=(10, 10),
+                           display=False, **kwargs):
         """
             Plot the dimensionaliry reduction results from self.dims_df
         """
         if self.dims_df is None:
-            raise ValueError("No dimensionality reduction results found. Run cluster_data() first.")
+            raise ValueError("No dimensionality reduction results found."
+                             "Run cluster_data() first.")
         
         plot_df = self.dims_df.copy()
         if self.labels is not None:
@@ -910,7 +1029,9 @@ class Epochs:
             plot_df = plot_df[plot_df['label'] != -1]
 
         if not all(f'dim{dim}' in self.dims_df.columns for dim in dims):
-            raise ValueError(f"One or more specified dimensions {dims} do not exist in the dimensionality reduction results. Current availabel dimensions {self.dims_df.columns}.")
+            raise ValueError(f"One or more specified dimensions {dims} do not"
+                             "exist in the dimensionality reduction results."
+                             f"Current availabel dimensions {self.dims_df.columns}.")
 
         dim1, dim2 = f'dim{dims[0]}', f'dim{dims[1]}'
 
@@ -936,13 +1057,14 @@ class Epochs:
                 sns.scatterplot(data=plot_df, x=dim1, y=dim2, ax=ax, palette=palette, edgecolor=edgecolor, s=s, alpha=alpha, **kwargs)
                 ax.set_xlabel(dim1)
                 ax.set_ylabel(dim2)
-            return ax
-
+            if display:
+                plt.show()
 
     # Feature vizualization methods
 
     def plot_simple_pca(self, n_components=2, x='PC1', y='PC2', plot_outliers=True, title='PCA',
-                        ax=None, figisize=(4,4), palette='tab10', edgecolor='black', **kwargs):
+                        ax=None, figisize=(4,4), palette='tab10', edgecolor='black',
+                        display=False, **kwargs):
                             
         """
             Perform and visualize PCA.
@@ -1000,7 +1122,8 @@ class Epochs:
 
         if self.labels is not None:
             ax.legend(loc='upper left', bbox_to_anchor=(1, 1), title='Label')
-        plt.show()
+        if display:
+            plt.show()
 
     def plot_pca(self, n_components, **kwargs):
         """

@@ -344,7 +344,7 @@ class ClusterInterpreter:
         # Loop through the unique labels and plot for each
         for i, label in enumerate(unique_labels):
             # Get the indices of epochs corresponding to the current label
-            label_ids = np.array(self.epochs.feats[self.epochs.labels == label].index)
+            label_ids = np.array(self.epochs.feats.reset_index()[self.epochs.labels == label].index)
 
             random_ids = np.random.choice(label_ids, n_epochs, replace=False)
 
