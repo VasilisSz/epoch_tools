@@ -74,6 +74,8 @@ class Epochs:
         self.reducer_params = None
         self.clusterer_params = None
 
+        self.extra_info = {} # Placeholder for additional information
+
     # Clone the MNE Epochs object to inherit its functionality
     def __getattr__(self, attr):
         """
