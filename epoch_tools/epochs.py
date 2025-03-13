@@ -288,15 +288,19 @@ class Epochs:
 
         feats = self.metadata.copy()
 
-        if dropna:
-            feats = feats.dropna()
-            self.feats_idx = feats.index
-
         # Selecting features subset
         if self.features_subset:
             feats = feats[self.features_subset]
         else:
             feats = feats[self.feature_cols]
+
+        if dropna:
+            # Legacy: does nothing now
+            print("Dropna is deprecated and will be completely removed in future versions...\n\
+                  Remove NaNs before calling get_features.")
+            # feats = feats.dropna()
+            # self.feats_idx = feats.index
+
 
         if ch_names:
             if isinstance(ch_names, dict):

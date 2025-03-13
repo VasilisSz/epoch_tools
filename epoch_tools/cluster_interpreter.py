@@ -8,6 +8,8 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import confusion_matrix, accuracy_score
 from matplotlib.backends.backend_pdf import PdfPages
 
+import cv2
+
 import shap  # pip install shap
 import os
 
@@ -84,12 +86,21 @@ class ClusterInterpreter:
         self.y = self.epochs.labels
 
         # Split into train/test for validation (even though they're pseudo-labels)
-        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
-            self.X, self.y,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            stratify=self.y  # keeps cluster distribution consistent
-        )
+        try:
+            self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+                self.X, self.y,
+                test_size=self.test_size,
+                random_state=self.random_state,
+                stratify=self.y  # keeps cluster distribution consistent
+            )
+        except ValueError as e:
+            print(f"Error splitting data: {e}. Skipping stratification.")
+            self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+                self.X, self.y,
+                test_size=self.test_size,
+                random_state=self.random_state,
+                stratify=None  # keeps cluster distribution consistent
+            )
 
         # Create the model
         if self.model_type == 'random_forest':
@@ -160,7 +171,7 @@ class ClusterInterpreter:
 
         return accuracy_score(self.y_test, self.y_pred)
 
-    def plot_feature_importances_global(self, top_n=20, ax=None, figsize=(8, 5), display=True):
+    def plot_feature_importances_global(self, top_n=20, ax=None, figsize=None, display=True):
         """
         Plot the global (model-wide) feature importances from the trained model (if available).
         This does NOT distinguish among clusters; it's the overall importance in the multi-class setting.
@@ -183,7 +194,7 @@ class ClusterInterpreter:
         top_features = idxs[:top_n]
 
         if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
+            _, ax = plt.subplots(figsize=figsize if figsize is not None else (8, 6))
         sns.barplot(
             x=importances[top_features],
             y=[feature_names[i] for i in top_features],
@@ -227,7 +238,7 @@ class ClusterInterpreter:
         n_features = len(data.columns) - 1
         # figsize width scales with number of features
         if ax is None:
-            figsize = (n_features, 6) if figsize is None else figsize
+            figsize = (n_features*1.2, 10) if figsize is None else figsize
             fig, ax = plt.subplots(figsize=figsize)
 
         if plot_type == 'violin':
@@ -306,7 +317,10 @@ class ClusterInterpreter:
             plt.show()
 
 
-    def plot_epoch_signal(self, n_epochs=5, plot_outliers=True, channels_to_plot='all', cmap='hls', nstd='auto', display=True):
+    def plot_epoch_signal(self, n_epochs=5, plot_outliers=True, make_clips=False,
+                          channels_to_plot='all', cmap='hls', nstd='auto', 
+                          display=True, video_path=None, output_folder=None,
+                          frame_cols=['start_frame', 'end_frame']):
         """
         Plot raw EEG signals for epochs from different clusters.
 
@@ -325,6 +339,9 @@ class ClusterInterpreter:
         """
         
         import matplotlib.gridspec as gridspec
+
+        if make_clips and (video_path is None or output_folder is None):
+            raise ValueError("For clip generation, both video_path and output_folder must be provided.")
 
         if channels_to_plot == 'all':
             channels_to_plot = self.epochs.ch_names
@@ -346,7 +363,7 @@ class ClusterInterpreter:
             # Get the indices of epochs corresponding to the current label
             label_ids = np.array(self.epochs.feats.reset_index()[self.epochs.labels == label].index)
 
-            random_ids = np.random.choice(label_ids, n_epochs, replace=False)
+            random_ids = np.random.choice(label_ids, n_epochs, replace=True)
 
             for j, epoch_id in enumerate(random_ids):
                 # Define GridSpec for the current (j, i) cell
@@ -386,6 +403,14 @@ class ClusterInterpreter:
                         ax_channel.set_xticks([])
                         ax_channel.spines['top'].set_visible(False)
                         ax_channel.spines['bottom'].set_visible(False)    
+                if make_clips:
+                    start = self.epochs.metadata.reset_index().loc[epoch_id, frame_cols[0]]
+                    end = self.epochs.metadata.reset_index().loc[epoch_id, frame_cols[1]]
+                    fname = f"{self.epochs.animal_id}_cluster_{label}_epoch_{epoch_id}.mp4"
+                    self._create_clip(video_path=video_path, 
+                                    start=int(start), 
+                                    end=int(end), 
+                                    fname=os.path.join(output_folder, fname))
         plt.tight_layout()
         if display:
             plt.show()
@@ -465,6 +490,131 @@ class ClusterInterpreter:
 
         if display:
             plt.show()
+    
+    def plot_transition_matrix(self, normalize=False, cmap='Blues', 
+                               figsize=None, display=True):
+        """
+        Plot the transition matrix of cluster labels.
+        """
+        data = self.epochs.labels
+        n_clusters = len(np.unique(data))
+        if not normalize:
+            normalize = None
+        cm = confusion_matrix(data[:-1], data[1:], normalize=normalize)
+        _, ax = plt.subplots(figsize=figsize if figsize is not None else (n_clusters, n_clusters))
+        sns.heatmap(cm, annot=True, cmap=cmap, ax=ax)
+        ax.set_xlabel("Next Cluster")
+        ax.set_ylabel("Current Cluster")
+        ax.set_title("Transition Matrix" + (" (Normalized)" if normalize else ""))
+        plt.tight_layout()
+        if display:
+            plt.show()
+        # return ax
+
+    def _create_clip(self, video_path, start, end, fname):
+        """
+        Create a video clip from a given start and end frame.
+
+        Parameters
+        ----------
+        video_path : str
+            Path to the input video file.
+        start : int
+            Start frame number.
+        end : int
+            End frame number.
+        fname : str
+            Output file name.
+        """
+        # Open the video file
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            print(f"Error opening video file: {video_path}")
+            return
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        # clip_filename = os.path.join(output_folder, f"cluster_{label}_epoch_{epoch_idx}.mp4")
+        out = cv2.VideoWriter(fname, fourcc, fps, (width, height))
+
+        # Set the video to the starting frame
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        for _ in range(start, end + 1):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out.write(frame)
+
+        out.release()
+        cap.release()
+
+
+    def generate_clips(self, video_path, output_folder, n_epochs=5,
+                       plot_outliers=True, frame_range=None, fname_prefix=None,
+                       frame_cols=['start_frame', 'end_frame']):
+        """
+        Generate video clips for a random selection of epochs per cluster.
+
+        Parameters
+        ----------
+        video_path : str
+            Path to the input video file.
+        output_folder : str
+            Folder where video clips will be saved.
+        n_epochs : int, optional
+            Number of random epochs per cluster for which to generate clips.
+        plot_outliers : bool, optional
+            Whether to include epochs with label -1.
+        frame_range : list of tuples, optional
+            If provided, use (start_frame, end_frame) for all epochs instead of using metadata.
+        frame_cols : list, optional
+            Column names in `self.epochs.metadata` that contain the start and end frame numbers.
+        """
+        # Ensure frame_cols are present in metadata
+        if not all(col in self.epochs.metadata.columns for col in frame_cols):
+            raise ValueError(f"Columns {frame_cols} not found in metadata. Make\
+                             sure to include them or change the 'frame_cols' argument.")
+        
+        # Create output folder if it does not exist
+        os.makedirs(output_folder, exist_ok=True)
+
+        if frame_range is not None:
+            for start, end in frame_range:
+                fname = f"frame_{start}_{end}.mp4" if fname_prefix is None else f"{fname_prefix}_{start}_{end}.mp4"
+                clip_filename = os.path.join(output_folder, fname)
+                self._create_clip(video_path, start, end, clip_filename)
+                print(f"Saved clip for frame range {start}-{end} to {clip_filename}")
+            return
+
+        # Loop through each cluster and select random epochs
+        labels = self.epochs.labels
+        if not plot_outliers:
+            indices = np.where(labels != -1)[0]
+        else:
+            indices = np.arange(len(labels))
+
+        unique_labels = np.unique(labels[indices])
+
+        for label in unique_labels:
+            # Get indices for epochs in the current cluster
+            cluster_indices = [i for i in indices if labels[i] == label]
+            if len(cluster_indices) == 0:
+                continue
+
+            # Randomly select epochs
+            chosen_indices = np.random.choice(cluster_indices, n_epochs, replace=True)
+
+            for epoch_idx in chosen_indices:
+                # Determine frame range for this epoch:
+                start_frame = self.epochs.metadata.reset_index().loc[epoch_idx, frame_cols[0]]
+                end_frame = self.epochs.metadata.reset_index().loc[epoch_idx, frame_cols[1]]
+                fname = f"{self.epochs.animal_id}_cluster_{label}_epoch_{epoch_idx}.mp4" if fname is None else fname
+                clip_filename = os.path.join(output_folder, fname)
+                self._create_clip(video_path, int(start_frame), int(end_frame), clip_filename)
+                print(f"Saved clip for cluster {label}, epoch {epoch_idx} to {clip_filename}")
 
 
     # SHAP
