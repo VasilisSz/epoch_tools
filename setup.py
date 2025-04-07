@@ -19,16 +19,18 @@ setup(
         "PyQt5",
         "seaborn",
         "scikit-learn",
-        "shap",
+        "shap==0.46.0",
         "umap-learn",
+        "fastcluster",
         "hdbscan",
         "pca",
         "ipywidgets",
         "IPython",
-        "shap",
         "xgboost",
         "catboost",
-        "bayesian-optimization"
+        "bayesian-optimization",
+        "openpyxl",
+        "opencv-python",
 
     ],
     classifiers=[

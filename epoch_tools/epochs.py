@@ -165,6 +165,9 @@ class Epochs:
             Epochs
                 A new Epochs object containing the subset.
         """
+        if isinstance(item, pd.Index):
+            item = item.tolist()
+
         subset_epochs = self.epochs[item]
         new = Epochs(
             subset_epochs,
@@ -172,14 +175,37 @@ class Epochs:
             animal_id=self.animal_id,
             condition=self.condition,
         )
-        new.metadata = self.metadata[item]
-        # Also slice features/labels
-        if self.feats is not None:
-            new.feats = self.feats[item]
-            new.feats = new.feats.reset_index(drop=True)
-        if self.labels is not None:
-            new.labels = self.labels[item]
+        if isinstance(item, (list, np.ndarray)):
+            new.metadata = self.metadata.iloc[item]
+            # Also slice features/labels
+            try:
+                if self.feats is not None:
+                    new.feats = self.feats.iloc[new.metadata.index]
+                    new.feats = new.feats.reset_index(drop=True)
+                if self.labels is not None:
+                    new.labels = self.labels[new.metadata.index]
+            except IndexError:
+                print("IndexError: The index of the features/labels does not match the metadata index.")
+                print("Resetting features/labels to None.")
+                new.feats = None
+                new.labels = None
+        else:
+            new.metadata = self.metadata[item]
+            # Also slice features/labels
+            try:
+                if self.feats is not None:
+                    new.feats = self.feats.iloc[new.metadata.index]
+                    new.feats = new.feats.reset_index(drop=True)
+                if self.labels is not None:
+                    new.labels = self.labels[new.metadata.index]
+            except IndexError:
+                print("IndexError: The index of the features/labels does not match the metadata index.")
+                print("Resetting features/labels to None.")
+                new.feats = None
+                new.labels = None
+        
         return new
+        
 
     def __deepcopy__(self, memo):
         # Create a new instance with a copied MNE Epochs
@@ -253,28 +279,17 @@ class Epochs:
             # column_selector.close()
             # button.close()
 
-    def get_features_df(self):
-        """
-            Retrieve the metadata features as a DataFrame.
-
-            Returns:
-            --------
-            pd.DataFrame
-                The metadata features.
-        """
-        return self.metadata[self.feature_cols]
-    
-    def get_features(self, scaler='standard', dropna=True,
+    def get_features(self, cols=None, scaler='standard',
                      ch_names=None, as_array=False):
         """
             Extract features from the metadata with optional scaling.
 
             Parameters:
             -----------
+            cols: list, optional
+                List of feature names to include. Will override features_subset.
             scaler : str or None, optional
                 Scaling method ('minmax', 'standard', or None).
-            dropna : bool, optional
-                Whether to drop NaN values.
             ch_names : list or dict, optional
                 Filter features by specific channel names.
             as_array : bool, optional
@@ -289,18 +304,15 @@ class Epochs:
         feats = self.metadata.copy()
 
         # Selecting features subset
-        if self.features_subset:
+        if cols:
+            assert isinstance(cols, list)
+            feats = feats[cols]
+            if self.features_subset:
+                print("Warning: features_subset is not used when cols are provided.")
+        elif self.features_subset:
             feats = feats[self.features_subset]
         else:
             feats = feats[self.feature_cols]
-
-        if dropna:
-            # Legacy: does nothing now
-            print("Dropna is deprecated and will be completely removed in future versions...\n\
-                  Remove NaNs before calling get_features.")
-            # feats = feats.dropna()
-            # self.feats_idx = feats.index
-
 
         if ch_names:
             if isinstance(ch_names, dict):
@@ -370,7 +382,8 @@ class Epochs:
         )
         ax = [ax] if n_channels == 1 else ax
         for i, ch in enumerate(channels):
-            ax[i].plot(self.epochs.get_data(picks=ch)[idx, :, :].T,
+            ch_data = self.epochs[self.metadata.index==idx].get_data(picks=ch)[0][0]
+            ax[i].plot(ch_data,
                        color='black', alpha=0.85)
             ax[i].set_title(ch)
 
@@ -403,8 +416,9 @@ class Epochs:
                 fmin=fmin, fmax=fmax, **kwargs
             )
         else:
+            ch_data = self.epochs[self.metadata.index==epoch_idx].get_data(picks=channels)[0]
             psd, freq = mne.time_frequency.psd_array_multitaper(
-                self.epochs.get_data(picks=channels)[epoch_idx],
+                ch_data,
                 sfreq=self.sfreq, fmin=fmin, fmax=fmax, **kwargs
             )
         return psd, freq

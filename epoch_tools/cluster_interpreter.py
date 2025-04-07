@@ -4,13 +4,13 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import copy
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import confusion_matrix, accuracy_score
 from matplotlib.backends.backend_pdf import PdfPages
 
 import cv2
 
-import shap  # pip install shap
+import shap
 import os
 
 from .utils import row_col_layout
@@ -78,7 +78,7 @@ class ClusterInterpreter:
                - epochs.labels : array-like cluster assignments
         """
         if self.epochs.feats is None:
-            raise ValueError("No features found. Make sure you call TainiEpochs.get_features() first.")
+            raise ValueError("No features found. Make sure you call Epochs.get_features() first.")
         if not hasattr(self.epochs, 'labels') or self.epochs.labels is None:
             raise ValueError("No cluster labels found. Make sure you've assigned `epochs.labels` from clustering.")
 
@@ -102,19 +102,11 @@ class ClusterInterpreter:
                 stratify=None  # keeps cluster distribution consistent
             )
 
-        # Create the model
-        if self.model_type == 'random_forest':
-            self.model = RandomForestClassifier(
-                random_state=self.random_state, 
-                **self.model_params
-            )
-        elif self.model_type == 'gbm':
-            self.model = GradientBoostingClassifier(
-                random_state=self.random_state, 
-                **self.model_params
-            )
         if self.model_type == 'random_forest':
             self.model = RandomForestClassifier(random_state=self.random_state, **self.model_params)
+        elif self.model_type == 'gbm':
+            from sklearn.ensemble import GradientBoostingClassifier
+            self.model = GradientBoostingClassifier(random_state=self.random_state, **self.model_params)
         elif self.model_type == 'xgboost':
             from xgboost import XGBClassifier
             self.model = XGBClassifier(random_state=self.random_state, **self.model_params)
@@ -122,7 +114,7 @@ class ClusterInterpreter:
             from catboost import CatBoostClassifier
             self.model = CatBoostClassifier(random_state=self.random_state, verbose=0, **self.model_params)
         else:
-            raise ValueError("Invalid model_type. Choose 'random_forest', 'xgboost', 'lightgbm', or 'catboost'.")
+            raise ValueError("Invalid model_type. Choose 'random_forest', 'xgboost', 'gbm', or 'catboost'.")
         
         # Fit the model
         self.model.fit(self.X_train, self.y_train)
@@ -131,6 +123,7 @@ class ClusterInterpreter:
         self.y_pred = self.model.predict(self.X_test)
 
         print(f"Model trained on {len(self.X_train)} samples. Held out {len(self.X_test)} for testing.")
+        print(f"Accuracy: {self.get_accuracy()}")
 
     def plot_confusion_matrix(self, normalize=False, annot=True, cmap="Blues", ax=None, figsize=(5, 5), display=True):
         """
@@ -207,6 +200,15 @@ class ClusterInterpreter:
             plt.tight_layout()
             plt.show()
     
+    def _get_correct_i(self, i):
+        """
+        Helper function to get the correct index of the mne.Epochs signal, based
+        on the metadata.
+        """
+        pass
+
+
+
 
     def plot_feature_values(self, exclude_features = [], plot_outliers=True, plot_type='violin', 
                             palette='tab10', ax=None, figsize=None, display=True, **kwargs):
@@ -361,9 +363,11 @@ class ClusterInterpreter:
         # Loop through the unique labels and plot for each
         for i, label in enumerate(unique_labels):
             # Get the indices of epochs corresponding to the current label
-            label_ids = np.array(self.epochs.feats.reset_index()[self.epochs.labels == label].index)
+            label_ids = np.array(self.epochs.feats[self.epochs.labels == label].index)
 
             random_ids = np.random.choice(label_ids, n_epochs, replace=True)
+            # sort the random_ids for better visualization
+            random_ids = np.sort(random_ids)
 
             for j, epoch_id in enumerate(random_ids):
                 # Define GridSpec for the current (j, i) cell
@@ -374,9 +378,10 @@ class ClusterInterpreter:
                 )
 
                 for k, channel in enumerate(channels_to_plot):
+                    ch_data = self.epochs.epochs[self.epochs.metadata.index==epoch_id].get_data(picks=channel)[0][0]
                     # Create a subplot for the specific channel
                     ax_channel = fig.add_subplot(gs[k, 0])
-                    ax_channel.plot(self.epochs.get_data(picks=channel)[epoch_id][0], color=colors[k], linewidth=0.9)
+                    ax_channel.plot(ch_data, color=colors[k], linewidth=0.9)
                     ax_channel.set_title(f"Epoch {epoch_id} - Cluster {label}")
                     ax_channel.set_ylabel(channel,rotation=0, ha='right')
                     ax_channel.set_xlabel('Time (samples)')
@@ -404,8 +409,8 @@ class ClusterInterpreter:
                         ax_channel.spines['top'].set_visible(False)
                         ax_channel.spines['bottom'].set_visible(False)    
                 if make_clips:
-                    start = self.epochs.metadata.reset_index().loc[epoch_id, frame_cols[0]]
-                    end = self.epochs.metadata.reset_index().loc[epoch_id, frame_cols[1]]
+                    start = self.epochs.metadata.loc[epoch_id, frame_cols[0]]
+                    end = self.epochs.metadata.loc[epoch_id, frame_cols[1]]
                     fname = f"{self.epochs.animal_id}_cluster_{label}_epoch_{epoch_id}.mp4"
                     self._create_clip(video_path=video_path, 
                                     start=int(start), 
@@ -537,7 +542,8 @@ class ClusterInterpreter:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        # clip_filename = os.path.join(output_folder, f"cluster_{label}_epoch_{epoch_idx}.mp4")
+        # Check if folder exists, if not create it
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
         out = cv2.VideoWriter(fname, fourcc, fps, (width, height))
 
         # Set the video to the starting frame
