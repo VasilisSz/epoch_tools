@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 print(find_packages())
 setup(
     name="epoch_tools",
-    version="0.1.1",
+    version="0.1.2",
     author="Vasilis Siozos",
     author_email="v.siozos@rug.nl",
     description="A package for analyzing and clustering EEG epochs",

@@ -4,3 +4,4 @@ tests/
 */test_data/
 *.egg-info/
 *TODO.md
+*.mp4
