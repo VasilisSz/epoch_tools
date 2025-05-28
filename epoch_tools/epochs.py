@@ -1,6 +1,7 @@
-from .utils import row_col_layout
+from .utils import row_col_layout, compute_err
 
 import mne
+from mne.epochs import BaseEpochs
 
 import pandas as pd
 import numpy as np
@@ -27,7 +28,6 @@ import os
 import contextlib
 import copy
 import warnings
-
 warnings.filterwarnings("ignore", category=FutureWarning, 
                         module="sklearn.utils.deprecation")
 warnings.filterwarnings("ignore", category=UserWarning, module="umap")
@@ -50,9 +50,10 @@ class Epochs:
             condition : str, optional
                 Experimental condition associated with the epochs.
         """
-        if not isinstance(epochs, mne.epochs.EpochsFIF):
+        if not isinstance(epochs, BaseEpochs):
             raise ValueError(
-                "The provided object must be an instance of mne.Epochs."
+                "The provided object must be an MNE Epochs instance "
+                f"(got {type(epochs)})."
             )
         self.epochs = epochs
         self.sfreq = epochs.info['sfreq']
@@ -73,6 +74,8 @@ class Epochs:
         self.clusterer = None
         self.reducer_params = None
         self.clusterer_params = None
+
+        self.psd_results = {}  # Cache for PSD results
 
         self.extra_info = {} # Placeholder for additional information
 
@@ -390,7 +393,9 @@ class Epochs:
         plt.tight_layout()
 
     def compute_psd_(self, channels='all', fmin=0, fmax=100,
-                     epoch_idx=None, **kwargs):
+                     epoch_idx=None, method='multitaper', 
+                     n_fft=None, n_per_seg=None,
+                     **kwargs):
         """
             Compute the power spectral density (PSD) of the epochs.
 
@@ -411,16 +416,28 @@ class Epochs:
                 PSD values and corresponding frequencies.
         """
         if epoch_idx is None:
+            data = self.epochs.get_data(picks=channels)
+        else:
+            data = self.epochs[self.metadata.index==epoch_idx].get_data(picks=channels)[0]
+
+        if method == 'multitaper':
             psd, freq = mne.time_frequency.psd_array_multitaper(
-                self.epochs.get_data(picks=channels), sfreq=self.sfreq,
+                data, sfreq=self.sfreq,
                 fmin=fmin, fmax=fmax, **kwargs
             )
-        else:
-            ch_data = self.epochs[self.metadata.index==epoch_idx].get_data(picks=channels)[0]
-            psd, freq = mne.time_frequency.psd_array_multitaper(
-                ch_data,
-                sfreq=self.sfreq, fmin=fmin, fmax=fmax, **kwargs
-            )
+        elif method == 'welch':
+            # 1 Hz resolution by default
+            n_fft = int(self.sfreq) if n_fft is None else n_fft
+            n_per_seg = int(self.sfreq) if n_per_seg is None else n_per_seg
+
+            psd, freq = mne.time_frequency.psd_array_welch(
+                data, sfreq=self.sfreq,
+                fmin=fmin, fmax=fmax, 
+                n_fft=n_fft, n_per_seg=n_per_seg,
+                **kwargs)
+        
+        # psd: shape (n_epochs, n_channels, n_freqs)
+        # freq: shape (n_freqs,)
         return psd, freq
 
     def plot_psd_(self, channels='all', fmin=0, fmax=100,
@@ -515,6 +532,136 @@ class Epochs:
                 ax[i].axvline(fmin_, color='black', linestyle='--', alpha=0.1)
                 ax[i].axvline(fmax_, color='black', linestyle='--', alpha=0.1)
         plt.tight_layout()
+
+    def compare_psd(
+        self,
+        hue,
+        *,
+        channels="all",
+        method="welch",
+        avg_level="subject",          # {"all", "subject"}
+        err_method="sem",          # {"sd","sem","ci",None}
+        palette="tab10",
+        **kwargs,
+    ):
+        """
+        Compare PSDs between groups defined by *hue* (one or several metadata
+        columns) and plot the group-average spectra.
+
+        Parameters
+        ----------
+        hue : str | list[str]
+            Column(s) in *self.metadata* that define the groups.
+        channels : list[str] | "all"
+            Channel(s) forwarded to `compute_psd_`.
+        method : {"multitaper","welch"}
+            PSD estimation method (forwarded).
+        avg_level : {"all","subject"}
+            - ``"all"``   - average *all* epochs belonging to a group.
+            - ``"subject"`` - first average within each subject
+            (metadata column ``'animal_id'`` **must exist**),
+            then average those subject means.
+        err_method : {"sd","sem","ci",None}
+            What to show as shaded error; *None* disables shading.
+        palette : str | sequence
+            Matplotlib / seaborn palette.
+        **kwargs
+            Any other keyword arguments are passed straight to `compute_psd_`.
+
+        """
+
+        hue_cols = [hue] if isinstance(hue, str) else list(hue)
+        missing  = [c for c in hue_cols if c not in self.metadata.columns]
+        if missing:
+            raise ValueError(f"Hue column(s) not in metadata: {missing}")
+
+        if avg_level not in {"all", "subject"}:
+            raise ValueError("avg_level must be 'all' or 'subject'.")
+
+        psd, freq = self.compute_psd_(
+            channels=channels,
+            method=method,
+            **kwargs,
+        )  # psd shape → (n_epochs, n_channels, n_freqs)
+
+        # Build a DataFrame whose rows correspond to epochs
+        helper = self.metadata[hue_cols].copy().reset_index(drop=True)
+        if avg_level == "subject":
+            if "animal_id" not in self.metadata.columns:
+                raise ValueError(
+                    "avg_level='subject' requires an 'animal_id' column "
+                    "in metadata."
+                )
+            helper["__subject__"] = self.metadata["animal_id"].values
+
+
+        group_labels = helper[hue_cols].agg(tuple, axis=1)
+        unique_groups = sorted(group_labels.unique())
+        colours = sns.color_palette(palette, n_colors=len(unique_groups))
+
+        mean_dict, err_dict = {}, {}
+
+        for grp in unique_groups:
+            idx    = group_labels[group_labels == grp].index.to_numpy()
+            grp_psd = psd[idx]                     # (n_e, n_ch, n_f)
+
+            # ---- averaging level -------------------------------------
+            if avg_level == "subject":
+                subj_ids = helper.loc[idx, "__subject__"]
+                subj_means = []
+                for subj in subj_ids.unique():
+                    mask = (subj_ids == subj).to_numpy()        # ← revised
+                    subj_means.append(grp_psd[mask].mean(axis=(0, 1)))
+                subj_means = np.vstack(subj_means)
+                group_mean = subj_means.mean(axis=0)
+                err = compute_err(subj_means, err_method)
+            else:  # "all"
+                group_mean = grp_psd.mean(axis=(0, 1))     # 1 × n_freqs
+                flat = grp_psd.reshape(-1, grp_psd.shape[-1])  # (n_e*n_ch)×n_freqs
+                err = compute_err(flat, err_method)
+
+            mean_dict[grp] = group_mean
+            err_dict[grp]  = err
+
+        # cache the results
+        cache_key = (
+            tuple(hue_cols),
+            tuple(channels) if isinstance(channels, list) else channels,
+            method,
+            avg_level,
+            err_method,
+            frozenset(kwargs.items()),
+        )
+        self.psd_results[cache_key] = dict(
+            freq=freq,
+            mean=mean_dict,
+            err=err_dict,
+        )
+
+        # plotting
+        fig, ax = plt.subplots(figsize=(8, 4))
+        for clr, grp in zip(colours, unique_groups):
+            label = (
+                ", ".join(f"{c}={v}" for c, v in zip(hue_cols, grp))
+                if isinstance(grp, tuple)
+                else f"{hue_cols[0]}={grp}"
+            )
+            m = mean_dict[grp]
+            ax.plot(freq, m, label=label, color=clr, linewidth=1.8)
+            e = err_dict[grp]
+            if e is not None:
+                ax.fill_between(freq, m - e, m + e, alpha=0.25, color=clr)
+
+        ax.set(
+            xlabel="Frequency (Hz)",
+            ylabel="Power Spectral Density (mV/Hz)",
+            xlim=(freq.min(), freq.max()),
+        )
+        ax.legend(title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
+        ax.set_yscale("log")
+        sns.despine()
+        plt.tight_layout()
+        return fig, ax
 
     # Clustering methods
     def cluster_data(
@@ -1428,5 +1575,58 @@ class Epochs:
             obj = pickle.load(f)
         return obj
 
+    @classmethod
+    def concatenate(cls, epochs_list, *, reset_index=True):
+        """
+        Concatenate several *et.Epochs* objects (wrapper instances) into
+        **one** new *et.Epochs* object.
+
+        Parameters
+        ----------
+        epochs_list : list[Epochs]
+            The objects to concatenate - order is preserved.
+        reset_index : bool, default ``True``
+            If *True* every metadata DataFrame is ``reset_index(drop=True)``
+            **before** concatenation.
+
+        Returns
+        -------
+        Epochs
+            A new instanced with concatenated ``mne.Epochs`` and
+            merged metadata.  ``non_feature_cols`` is the **union** of the
+            individual objects.  All other scratch attributes start empty.
+        """
+        if not epochs_list:
+            raise ValueError("epochs_list is empty.")
+        if not all(isinstance(e, cls) for e in epochs_list):
+            raise TypeError("All elements must be instances of Epochs.")
+
+        meta_frames = []
+        mne_epochs   = []
+        all_feats = pd.DataFrame()
+        union_non_feat = set()
+        for ep in epochs_list:
+            # keep track of which animal/condition the rows came from
+            meta = ep.metadata.copy()
+            if reset_index:
+                meta = meta.reset_index(drop=True)
+            meta_frames.append(meta)
+            mne_epochs.append(ep.epochs)
+            union_non_feat.update(ep.non_feature_cols)
+            all_feats = pd.concat([all_feats, ep.feats], ignore_index=True)
+
+        # concatenate mne.Epochs objects
+        concat_mne   = mne.concatenate_epochs(mne_epochs)
+        concat_meta  = pd.concat(meta_frames, ignore_index=True)
+        concat_mne.metadata = concat_meta
+
+        new_obj = cls(
+            concat_mne,
+            non_feature_cols=list(union_non_feat),
+            animal_id=None,
+            condition=None,
+        )
+        new_obj.feats = all_feats.reset_index(drop=True)
+        return new_obj
 
 
