@@ -392,6 +392,47 @@ class Epochs:
 
         plt.tight_layout()
 
+    def _drop_bad_channels(self, psd, channels, bad_channels):
+        """
+        Replace PSD values coming from bad channels with NaN.
+
+        Parameters
+        ----------
+        psd : ndarray, shape (n_epochs, n_channels, n_freqs)
+        channels : list[str]
+            Channel names used when `compute_psd_` was called.
+        bad_channels : dict[str, list[str]]
+            Mapping *animal_id → list(channel_names)*
+
+        Returns
+        -------
+        ndarray
+            A copy of *psd* with bad-channel slices set to NaN so that
+            subsequent `np.nanmean()` / `np.nanstd()` ignore them.
+        """
+        if not bad_channels or "animal_id" not in self.metadata.columns:
+            print("Warning: No bad channels provided or 'animal_id' not in metadata.")
+            return psd  # nothing to do
+        # Make bad_channels keys strings
+        bad_channels = {str(k): v for k, v in bad_channels.items()}
+        psd = psd.copy()
+        ch_map = {ch: i for i, ch in enumerate(channels)}
+
+        # Print how many nans in psd
+        print(f"Initial NaN count in PSD: {np.isnan(psd).sum()}")
+
+        for row, animal in enumerate(self.metadata["animal_id"].to_numpy()):
+            # match types of animal_id and animal in bad_channels
+            animal = str(animal)
+            bad = bad_channels.get(animal, [])
+            idx = [ch_map[ch] for ch in bad if ch in ch_map]
+            if idx:
+                psd[row, idx, :] = np.nan
+
+        # Print how many nans in psd after dropping bad channels
+        print(f"NaN count in PSD after dropping bad channels: {np.isnan(psd).sum()}")
+        return psd
+
     def compute_psd_(self, channels='all', fmin=0, fmax=100,
                      epoch_idx=None, method='multitaper', 
                      n_fft=None, n_per_seg=None,
@@ -485,20 +526,7 @@ class Epochs:
         if norm:
             psd /= np.sum(psd)
 
-        if err_method == 'sd':
-            err = np.std(psd, axis=0)
-        elif err_method == 'sem':
-            err = np.std(psd, axis=0) / np.sqrt(psd.shape[0])
-        elif err_method == "ci":
-            err = np.std(psd, axis=0)
-            err = 1.96 * err / np.sqrt(psd.shape[0])
-        elif err_method is None:
-            err = None
-        else:
-            raise ValueError(
-                "Invalid error method. Provide one of "
-                "['sd', 'sem', 'ci', 'none']."
-            )
+        err = compute_err(psd, err_method)
 
         nrows, ncols = row_col_layout(n_channels)
         fig, ax = plt.subplots(ncols=ncols, nrows=nrows, 
@@ -540,6 +568,8 @@ class Epochs:
         channels="all",
         method="welch",
         avg_level="subject",          # {"all", "subject"}
+        plot_individual_points=False,
+        bad_channels=None, 
         err_method="sem",          # {"sd","sem","ci",None}
         palette="tab10",
         **kwargs,
@@ -577,91 +607,105 @@ class Epochs:
 
         if avg_level not in {"all", "subject"}:
             raise ValueError("avg_level must be 'all' or 'subject'.")
+ 
+        if channels == "all":
+            ch_names = self.epochs.ch_names
+        else:
+            ch_names = list(channels)  # ensure list
+        n_channels = len(ch_names)
 
-        psd, freq = self.compute_psd_(
-            channels=channels,
-            method=method,
-            **kwargs,
-        )  # psd shape → (n_epochs, n_channels, n_freqs)
+        # compute PSD (n_epochs × n_channels × n_freqs)
+        psd, freq = self.compute_psd_(channels=ch_names, method=method, **kwargs)
+        psd       = self._drop_bad_channels(psd, ch_names, bad_channels)
 
-        # Build a DataFrame whose rows correspond to epochs
+        # helper DataFrame that maps every epoch to a group + subject
         helper = self.metadata[hue_cols].copy().reset_index(drop=True)
         if avg_level == "subject":
             if "animal_id" not in self.metadata.columns:
-                raise ValueError(
-                    "avg_level='subject' requires an 'animal_id' column "
-                    "in metadata."
-                )
+                raise ValueError("avg_level='subject' needs 'animal_id' in metadata.")
             helper["__subject__"] = self.metadata["animal_id"].values
 
+        group_labels   = helper[hue_cols].agg(tuple, axis=1)
+        unique_groups  = sorted(group_labels.unique())
+        colours        = sns.color_palette(palette, n_colors=len(unique_groups))
 
-        group_labels = helper[hue_cols].agg(tuple, axis=1)
-        unique_groups = sorted(group_labels.unique())
-        colours = sns.color_palette(palette, n_colors=len(unique_groups))
+        # containers for results
+        mean_dict, err_dict, indiv_dict = {}, {}, {}
 
-        mean_dict, err_dict = {}, {}
-
+        # iterate over groups
         for grp in unique_groups:
-            idx    = group_labels[group_labels == grp].index.to_numpy()
-            grp_psd = psd[idx]                     # (n_e, n_ch, n_f)
+            idx      = group_labels[group_labels == grp].index.to_numpy()
+            grp_psd  = psd[idx]                               # epochs in this grp
 
-            # ---- averaging level -------------------------------------
             if avg_level == "subject":
                 subj_ids = helper.loc[idx, "__subject__"]
                 subj_means = []
                 for subj in subj_ids.unique():
-                    mask = (subj_ids == subj).to_numpy()        # ← revised
-                    subj_means.append(grp_psd[mask].mean(axis=(0, 1)))
-                subj_means = np.vstack(subj_means)
-                group_mean = subj_means.mean(axis=0)
-                err = compute_err(subj_means, err_method)
-            else:  # "all"
-                group_mean = grp_psd.mean(axis=(0, 1))     # 1 × n_freqs
-                flat = grp_psd.reshape(-1, grp_psd.shape[-1])  # (n_e*n_ch)×n_freqs
-                err = compute_err(flat, err_method)
+                    mask = (subj_ids == subj).to_numpy()
+                    subj_means.append(np.nanmean(grp_psd[mask], axis=0))  # ch × f
+                subj_means = np.stack(subj_means)                         # subj × ch × f
+                group_mean = np.nanmean(subj_means, axis=0)               # ch × f
+                err        = compute_err(subj_means, err_method)
+                indiv_dict[grp] = subj_means                              # for plotting
+            else:  # avg_level == "all"
+                group_mean = np.nanmean(grp_psd, axis=0)                  # ch × f
+                err        = compute_err(grp_psd, err_method)
+                indiv_dict[grp] = grp_psd                                 # epoch × ch × f
 
             mean_dict[grp] = group_mean
             err_dict[grp]  = err
 
-        # cache the results
+        # cache results
         cache_key = (
             tuple(hue_cols),
-            tuple(channels) if isinstance(channels, list) else channels,
+            tuple(ch_names),
             method,
             avg_level,
             err_method,
             frozenset(kwargs.items()),
+            None if bad_channels is None else frozenset((k, tuple(v)) for k, v in bad_channels.items()),
         )
-        self.psd_results[cache_key] = dict(
-            freq=freq,
-            mean=mean_dict,
-            err=err_dict,
-        )
+        self.psd_results[cache_key] = dict(freq=freq, mean=mean_dict, err=err_dict)
 
-        # plotting
-        fig, ax = plt.subplots(figsize=(8, 4))
-        for clr, grp in zip(colours, unique_groups):
-            label = (
-                ", ".join(f"{c}={v}" for c, v in zip(hue_cols, grp))
-                if isinstance(grp, tuple)
-                else f"{hue_cols[0]}={grp}"
+        # plotting – one subplot per channel
+        nrows, ncols = row_col_layout(n_channels)
+        fig, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4*ncols, 3*nrows))
+        axs = np.atleast_1d(axs).ravel()        # always 1-D iterator
+
+        for ch_idx, (ax, ch_name) in enumerate(zip(axs, ch_names)):
+            for clr, grp in zip(colours, unique_groups):
+                label = (
+                    ", ".join(f"{c}={v}" for c, v in zip(hue_cols, grp))
+                    if isinstance(grp, tuple) else f"{hue_cols[0]}={grp}"
+                )
+                m = mean_dict[grp][ch_idx]
+                ax.plot(freq, m, color=clr, linewidth=1.8, label=label)
+
+                if err_dict[grp] is not None:
+                    e = err_dict[grp][ch_idx]
+                    ax.fill_between(freq, m-e, m+e, alpha=0.25, color=clr)
+
+                # optional individual lines
+                if plot_individual_points:
+                    lines = indiv_dict[grp]                               # n × ch × f
+                    for l in lines:
+                        ax.plot(freq, l[ch_idx], color=clr, alpha=0.25, linewidth=0.8)
+
+            ax.set(
+                title=ch_name,
+                xlabel="Frequency (Hz)",
+                ylabel="PSD (mV/Hz)",
+                xlim=(freq.min(), freq.max()),
             )
-            m = mean_dict[grp]
-            ax.plot(freq, m, label=label, color=clr, linewidth=1.8)
-            e = err_dict[grp]
-            if e is not None:
-                ax.fill_between(freq, m - e, m + e, alpha=0.25, color=clr)
+            ax.set_yscale("log")
+            ax.label_outer()       # only keep outer tick-labels
+            sns.despine(ax=ax)
 
-        ax.set(
-            xlabel="Frequency (Hz)",
-            ylabel="Power Spectral Density (mV/Hz)",
-            xlim=(freq.min(), freq.max()),
-        )
-        ax.legend(title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
-        ax.set_yscale("log")
-        sns.despine()
+        # single legend outside
+        handles, labels = axs[0].get_legend_handles_labels()
+        fig.legend(handles, labels, title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
         plt.tight_layout()
-        return fig, ax
+        return fig, axs
 
     # Clustering methods
     def cluster_data(
