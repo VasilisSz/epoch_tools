@@ -1,5 +1,5 @@
 import math
-
+import numpy as np
 
 def row_col_layout(n, rows=None, cols=None):
     """
@@ -37,3 +37,16 @@ def row_col_layout(n, rows=None, cols=None):
         ncols = math.ceil(n / nrows)
 
     return nrows, ncols
+
+
+def compute_err(arr, how):
+    """Return SD / SEM / 95 % CI (two-sided) along the first axis."""
+    if how is None:
+        return None
+    if how == "sd":
+        return np.nanstd(arr, axis=0, ddof=1)
+    if how == "sem":
+        return np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
+    if how == "ci":
+        return 1.96 * np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
+    raise ValueError("err_method must be one of {'sd','sem','ci',None}")

@@ -8,6 +8,8 @@ import mne
 from mne_connectivity import spectral_connectivity_epochs
 from scipy import signal, stats
 
+from .utils import row_col_layout
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -17,9 +19,10 @@ import networkx as nx
 
 import re
 
+from tqdm import tqdm
 
 
-def compute_con(epochs, method, fmin=0, fmax=100, **kwargs):
+def compute_con(epochs, method, fmin=1, fmax=100, **kwargs):
     """
         Wrapper to compute spectral connectivity for MNE Epochs objects.
 
@@ -47,573 +50,929 @@ def compute_con(epochs, method, fmin=0, fmax=100, **kwargs):
         fmin=fmin, fmax=fmax, faverage=True, verbose="ERROR", gc_n_lags=40, **kwargs)
     return con.get_data(output='dense')
 
+def connectivity_df(
+    epochs: mne.Epochs,
+    method: str,
+    hue,                        # str or list of str
+    *,
+    avg_level: str = "all",
+    freq_bands: dict | None = None,
+):
 
-def connectivity_df(epochs, method, grouper, per_subject=True, freq_bands = None):
+    if freq_bands is None:
+        freq_bands = {
+            "Delta": (2, 4), "Theta": (4, 8),
+            "Alpha": (8,13), "Beta": (13,30), "Gamma": (30,100)
+        }
+
+    # normalize hue_cols
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    for c in hue_cols:
+        if c not in epochs.metadata.columns:
+            raise ValueError(f"Hue column {c!r} not found")
+
+    # decide which columns to group by
+    if avg_level == "subject":
+        if "animal_id" not in epochs.metadata.columns:
+            raise ValueError("avg_level='subject' needs 'animal_id' in metadata")
+        group_cols = ["animal_id"] + hue_cols
+    elif avg_level == "all":
+        group_cols = hue_cols
+    else:
+        raise ValueError("avg_level must be 'all' or 'subject'")
+
+    # build results
+    rows = []
+    chs  = epochs.ch_names
+
+    # loop over every unique combination of group_cols
+    for combo, submeta in tqdm(epochs.metadata.groupby(group_cols), desc="Computing connectivity"):
+        # `combo` is a tuple of values (or a single value if len=1)
+        # subset the epochs
+        mask  = np.all([epochs.metadata[col] == submeta.iloc[0][col]
+                        for col in group_cols], axis=0)
+        subepo = epochs[mask]
+
+        # compute connectivity once on that subset
+        for band, (fmin, fmax) in freq_bands.items():
+            con = compute_con(subepo, method, fmin=fmin, fmax=fmax)
+
+            # flatten upper triangle
+            for i in range(con.shape[0]):
+                for j in range(i+1, con.shape[1]):
+                    row = {
+                        "con": con[j, i, 0],
+                        "node1": chs[i],
+                        "node2": chs[j],
+                        "band": band
+                    }
+                    # add the group columns back in
+                    if isinstance(combo, tuple):
+                        for col, val in zip(group_cols, combo):
+                            row[col] = val
+                    else:
+                        row[group_cols[0]] = combo
+
+                    rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def plot_connectivity_heatmap(
+    df,
+    # epochs,
+    # method,
+    hue,
+    *,
+    avg_level="all",
+    freq_bands=None,
+    vmin=0,
+    vmax=1,
+    upper=False,
+    cmap="viridis",
+    annot=True,
+    fmt=".2f",
+    figsize=None,
+    **sns_kwargs,
+):
     """
-    Compute connectivity for each subject or group and organize the results in a DataFrame.
+    For each unique hue-combination and each frequency band, plot
+    a node x node heatmap of mean connectivity.
 
-    Parameters:
+    Parameters
+    ----------
     epochs : mne.Epochs
-        The MNE Epochs object containing the EEG data.
     method : str
-        The method to use for computing connectivity (e.g., 'wpli2_debiased', 'dpli', 'coh,  etc.).
-    per_subject : bool, optional
-        If True, compute connectivity per subject. If False, compute connectivity per genotype (default is True).
+        passed to `connectivity_df`
+    hue : str or list of str
+        same as in `connectivity_df`
+    avg_level : {"all","subject"}
+        how to pool epochs
     freq_bands : dict, optional
-        Dictionary of frequency bands with their corresponding (fmin, fmax) tuples 
-        (default is None, which uses standard frequency bands).
+        band→(fmin,fmax). defaults to Delta…Gamma.
+    vmin, vmax : float, optional
+        color scale limits
+    cmap : str
+        matplotlib colormap
+    annot : bool
+        whether to write numbers in each square
+    fmt : str
+        text format for annotation
+    figsize : tuple, optional
+        e.g. (cols*4, rows*4)
+    **sns_kwargs : passed to `sns.heatmap`
+    """
 
-    Returns:
-    pandas.DataFrame
-        DataFrame containing the connectivity results with columns for 
-        connectivity value, nodes, frequency band, subject/genotype.
+
+    # 1) compute the tidy DataFrame
+    # df = connectivity_df(epochs, method, hue,
+    #                     avg_level=avg_level,
+    #                     freq_bands=freq_bands)
+
+    # 2) find unique groups & bands
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    groups   = df[hue_cols].drop_duplicates(keep="first")
+    group_tuples = [
+        tuple(row) if len(hue_cols)>1 else row[0]
+        for row in groups.values
+    ]
+    band_order = list(freq_bands or {
+        "Delta":(2,4),"Theta":(4,8),"Alpha":(8,13),
+        "Beta":(13,30),"Gamma":(30,100)
+    })
+
+    # 3) node list
+    nodes = sorted(set(df["node1"]) | set(df["node2"]))
+    n = len(nodes)
+
+    # 4) prep figure
+    nrows = len(group_tuples)
+    ncols = len(band_order)
+    if figsize is None:
+        figsize = (4 * ncols, 4 * nrows)
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=ncols,
+        figsize=figsize,
+        squeeze=False
+    )
+
+    # 5) loop & plot
+    for i, grp in enumerate(group_tuples):
+        # subset df for this group
+        if len(hue_cols)==1:
+            sub = df[df[hue_cols[0]] == grp]
+            title_prefix = f"{hue_cols[0]}={grp}"
+        else:
+            mask = np.all([
+                df[col] == val
+                for col, val in zip(hue_cols, grp)
+            ], axis=0)
+            sub = df[mask]
+            title_prefix = ", ".join(f"{c}={v}" for c, v in zip(hue_cols, grp))
+
+        for j, band in enumerate(band_order):
+            ax = axes[i][j]
+            subb = sub[sub["band"] == band]
+
+            # build empty matrix
+            mat = np.full((n, n), np.nan)
+            for _, row in subb.iterrows():
+                i1 = nodes.index(row["node1"])
+                i2 = nodes.index(row["node2"])
+                mat[i1, i2] = mat[i2, i1] = row["con"]
+            
+            mask_arr = None
+            if upper:
+                mask_arr = np.tril(np.ones((n,n), bool), k=-1)
+            else:
+                mask_arr = np.triu(np.ones((n,n), bool), k=1)
+
+            sns.heatmap(
+                mat,
+                mask=mask_arr,
+                ax=ax,
+                vmin=vmin, vmax=vmax,
+                cmap=cmap,
+                annot=annot,
+                fmt=fmt,
+                xticklabels=nodes,
+                yticklabels=nodes,
+                cbar_kws={'shrink': 0.75},
+                annot_kws={'size': 6},
+                **sns_kwargs
+            )
+            ax.set_title(f"{title_prefix}\n{band}")
+            ax.tick_params(axis="x", rotation=90)
+
+    plt.tight_layout()
+    return fig, axes
+
+
+
+def _p_to_stars(p):
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "ns"
+
+def compute_connectivity_stats(
+    df: pd.DataFrame,
+    hue_plot: str,
+    stats: str,
+    band_order: list[str]
+) -> pd.DataFrame:
+    """
+    Given a tidy connectivity DataFrame with columns
+    [node1, node2, band, con, <hue_plot>],
+    run the requested tests and return a DataFrame of results.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must contain columns ["node1","node2","band","con", hue_plot].
+    hue_plot : str
+        Column name to treat as the grouping variable.
+    stats : {"auto","ttest","anova","kruskal"}
+        Which test(s) to run.
+    band_order : list of band names
+        The frequency bands to iterate over, in order.
+
+    Returns
+    -------
+    stats_df : DataFrame with columns
+        ["node1","node2","band","test","stat","p_value"]
+    """
+    import scipy.stats as ss
+    records = []
+    levels = sorted(df[hue_plot].unique())
+
+    def do_test(arrs, test_name):
+        if test_name == "ttest":
+            return ss.ttest_ind(arrs[0], arrs[1],
+                                equal_var=False, nan_policy="omit")
+        elif test_name == "anova":
+            return ss.f_oneway(*arrs)
+        elif test_name == "kruskal":
+            return ss.kruskal(*arrs)
+        else:
+            raise ValueError(f"Unknown stats='{stats}'")
+
+    # decide test_name once for "auto"
+    if stats == "auto":
+        test_name = "ttest" if len(levels) == 2 else "anova"
+    else:
+        test_name = stats
+
+    # loop node‐pairs × bands
+    for (n1, n2), subpair in df.groupby(["node1","node2"]):
+        for band in band_order:
+            subb = subpair[subpair["band"] == band]
+            arrs = [subb.loc[subb[hue_plot] == lvl, "con"].values
+                    for lvl in levels]
+            stat, p = do_test(arrs, test_name)
+            records.append({
+                "node1": n1,
+                "node2": n2,
+                "band":  band,
+                "test":  test_name,
+                "stat":  stat,
+                "p_value": p
+            })
+
+    return pd.DataFrame(records)
+
+def plot_connectivity_categorical(
+    df,
+    # epochs,
+    # method,
+    hue,
+    *,
+    avg_level="all",
+    freq_bands=None,
+    plot_type="box",       # "bar","box","violin"
+    plot_individual_points=False,
+    stats='auto',
+    palette="hls",
+    figsize=None,
+    ylims = None,
+    **sns_kwargs,
+):
+    """
+    … same docstring …
+    Supports multi-column hue by automatically combining them into a
+    single synthetic column.
+    """
+    import warnings
+    import numpy as np
+    import pandas as pd
+    import seaborn as sns
+    import matplotlib.pyplot as plt
+
+    # 1) df
+    # df = connectivity_df(epochs, method, hue,
+    #                     avg_level=avg_level,
+    #                     freq_bands=freq_bands)
+    if freq_bands is None:
+        freq_bands = {
+            "Delta":(2,4),"Theta":(4,8),"Alpha":(8,13),
+            "Beta":(13,30),"Gamma":(30,100)
+        }
+
+    # 2) create composite hue column
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    if len(hue_cols) > 1:
+        df["_hue"] = df[hue_cols].agg(tuple, axis=1)
+        hue_plot = "_hue"
+        legend_title = ", ".join(hue_cols)
+    else:
+        hue_plot = hue_cols[0]
+        legend_title = hue_plot
+
+    # 3) pairs & bands
+    pairs = df[["node1","node2"]].drop_duplicates()
+    labels = [f"{r.node1}–{r.node2}" for r in pairs.itertuples(index=False)]
+    band_order = list(freq_bands)
+
+    # 4) warning
+    if avg_level=="all" and plot_individual_points:
+        warnings.warn("individual points only valid when avg_level='subject'")
+
+    # if stats requested, compute once up front
+    if stats is not None:
+        stats_df = compute_connectivity_stats(df, hue_plot, stats, band_order)
+
+
+    # 5) figure
+    n = len(labels)
+    nrows, ncols = row_col_layout(n)
+    if figsize is None:
+        figsize = (4.5*ncols, 3.5*nrows)
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axes = axes.ravel()
+
+    # 6) loop & plot
+    for ax, (node1, node2), lab in zip(axes, pairs.itertuples(index=False), labels):
+        sub = df[(df.node1==node1)&(df.node2==node2)]
+        if plot_type=="box":
+            sns.boxplot(
+                data=sub, x="band", y="con", hue=hue_plot,
+                order=band_order, palette=palette,
+                ax=ax, **sns_kwargs
+            )
+        elif plot_type=="bar":
+            sns.barplot(
+                data=sub, x="band", y="con", hue=hue_plot,
+                order=band_order, palette=palette,
+                errorbar="se", ax=ax, **sns_kwargs
+            )
+        else:  # violin
+            sns.violinplot(
+                data=sub, x="band", y="con", hue=hue_plot,
+                order=band_order, palette=palette,
+                cut=0, inner="box", ax=ax, **sns_kwargs
+            )
+
+        # individual points
+        if plot_individual_points and avg_level=="subject":
+            sns.stripplot(
+                data=sub, x="band", y="con", hue=hue_plot,
+                order=band_order, dodge=True,
+                palette='dark:black', size=3, alpha=.5,
+                jitter=False, ax=ax, legend=False
+            )
+            
+        ax.set_ylim(ylims)
+
+        # stats asterisks
+        if stats is not None:
+            # fix y‐coordinates at the top of the axes
+            y_min, y_max = ax.get_ylim()
+            y_line = y_max * 0.90     # 95% up the y‐axis
+            y_text = y_max * 0.95     # 99% up for the stars
+
+            substats = stats_df[
+                (stats_df.node1 == node1) & (stats_df.node2 == node2)
+            ]
+            for b_i, band in enumerate(band_order):
+                row   = substats[substats.band == band].iloc[0]
+                stars = _p_to_stars(row.p_value)
+
+                # horizontal line at constant height
+                ax.plot([b_i - 0.2, b_i + 0.2],
+                        [y_line, y_line],
+                        lw=1.5, color="black")
+
+                # text just above it
+                ax.text(b_i, y_text, stars,
+                        ha="center", va="bottom",
+                        color="black")
+
+        ax.set_title(lab)
+        ax.set_xlabel("")
+        ax.set_ylabel("Connectivity")
+        sns.despine(ax=ax)
+
+    # legend
+    handles, labels_ = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles[:len(df[hue_plot].unique())],
+        labels_[:len(df[hue_plot].unique())],
+        title=legend_title,
+        bbox_to_anchor=(1.02,1), loc="upper left"
+    )
+    for ax in axes:
+        if ax.get_legend(): ax.get_legend().remove()
+
+    plt.tight_layout()
+    
+    if stats is not None:
+        return fig, axes, stats_df
+    return fig, axes
+
+# Multivariate connectivity methods
+
+def compute_multi_connectivity_df(
+    epochs,
+    method: str,
+    hue,
+    *,
+    avg_level: str = "all",
+    freq_bands: dict | None = None,
+    fmin: float = 1.0,
+    fmax: float = 100.0,
+    mode: str = "multitaper",
+    con_kwargs: dict | None = None,
+):
+    """
+    Compute *multivariate* connectivity (e.g. MIM, MIC, CaCoh…) for each
+    group or subject and return a tidy DataFrame.
+
+    Parameters
+    ----------
+    epochs : mne.Epochs
+        The data.
+    method : str
+        Multivariate connectivity estimator (e.g. "mim", "mic", "cacoh", …).
+    hue : str or list[str]
+        Metadata column(s) defining experimental groups.
+    avg_level : {"all","subject"}, default "all"
+        - "all":    pool all epochs matching each unique hue combination
+                    and compute one connectivity spectrum per combo.
+        - "subject": compute one connectivity spectrum per subject
+                    (metadata column "animal_id" must exist), retaining
+                    hue labels as well.
+    freq_bands : dict | None
+        Mapping band_name → (fmin, fmax). Defaults to
+        {"Delta":(2,4),…"Gamma":(30,100)}.
+        Only used by downstream plotting; this function always returns
+        freq-by-freq rows.
+    fmin, fmax : float, default (1,100)
+        Frequency bounds for `spectral_connectivity_epochs`.
+    mode : str, default "multitaper"
+        Backend mode for spectral estimation.
+    con_kwargs : dict, optional
+        Extra keyword-args forwarded to `spectral_connectivity_epochs`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns:
+          - every column in `hue` (and, if avg_level="subject", also "animal_id"),
+          - "freq" (float),
+          - "con" (connectivity value).
     """
     if freq_bands is None:
-        freq_bands = {'Delta': (2, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 100)}
+        freq_bands = {
+            "Delta": (2, 4),
+            "Theta": (4, 8),
+            "Alpha": (8, 13),
+            "Beta":  (13, 30),
+            "Gamma": (30, 100),
+        }
 
-    metadata = epochs.metadata
-    groups = metadata[grouper].unique()
-    # DataFrame to store the results
-    results_df = pd.DataFrame()
+    con_kwargs = con_kwargs or {}
 
-    if per_subject:
-        mouse_ids = metadata['animal_id'].unique()
+    # validate hue columns
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    missing = [c for c in hue_cols if c not in epochs.metadata.columns]
+    if missing:
+        raise ValueError(f"Hue column(s) not in metadata: {missing}")
 
-        # Iterate over epochs
-        for mouse_id in mouse_ids:
-            # Subset data
-            mouse_epochs = epochs[metadata['animal_id']==mouse_id].copy()
-            mouse_group = mouse_epochs.metadata[grouper].unique()[0]
-            # print(genotype)
-        
-            # Compute connectivity for each frequency band
-            for band_name, (fmin, fmax) in freq_bands.items():
-                con = compute_con(mouse_epochs, method, fmin, fmax)
-
-                # Flatten connectivity matrix and add to the dictionary with appropriate names
-                for i in range(con.shape[1]):
-                    for j in range(i+1, con.shape[0]):
-                        results_df = pd.concat([results_df, pd.DataFrame(
-                            {
-                                'con' : con[j, i, 0],
-                                'node1' : epochs.ch_names[i],
-                                'node2' : epochs.ch_names[j],
-                                'band' : band_name,
-                                'mouse_id': mouse_id,
-                                'group':mouse_group
-                            }, index=[0]
-                        )], ignore_index=True)
-
-        return results_df
+    # decide how to group
+    if avg_level == "subject":
+        if "animal_id" not in epochs.metadata.columns:
+            raise ValueError("avg_level='subject' requires 'animal_id' column")
+        group_cols = ["animal_id"] + hue_cols
+    elif avg_level == "all":
+        group_cols = hue_cols
     else:
-        for group in groups:
-            genotype_epochs = epochs[epochs.metadata[grouper]==group].copy()
-            for band_name, (fmin, fmax) in freq_bands.items():
-                con = compute_con(genotype_epochs, method, fmin, fmax)
-                for i in range(con.shape[1]):
-                    for j in range(i+1, con.shape[0]):
-                        results_df = pd.concat([results_df, pd.DataFrame(
-                            {
-                                'con' : con[j, i, 0],
-                                'node1' : epochs.ch_names[i],
-                                'node2' : epochs.ch_names[j],
-                                'band' : band_name,
-                                'genotype':group
-                            }, index=[0]
-                        )], ignore_index=True)
-        return results_df
-    
-def plot_con_heatmap(con_df, freq_band, con_col = 'con', vmin=0, vmax=1, fig_title = '', 
-                     method='', cmap='viridis', ax=None):
+        raise ValueError("avg_level must be 'all' or 'subject'")
+
+    records = []
+    ch_names = epochs.ch_names
+
+    # loop over each unique grouping
+    for combo, submeta in tqdm(epochs.metadata.groupby(group_cols), desc="Computing multivariate connectivity"):
+        # pick the matching epochs
+        mask = np.ones(len(epochs), bool)
+        for col, val in zip(group_cols, (combo if isinstance(combo, tuple) else [combo])):
+            mask &= (epochs.metadata[col] == val)
+        sub_epochs = epochs[mask]
+
+        # compute connectivity (multivariate) → con_mat shape = (1, n_freqs)
+        con_obj = spectral_connectivity_epochs(
+            sub_epochs,
+            method=method,
+            mode=mode,
+            sfreq=sub_epochs.info["sfreq"],
+            fmin=fmin,
+            fmax=fmax,
+            faverage=False,
+            verbose="ERROR",
+            **con_kwargs,
+        )
+        data = con_obj.get_data()[0, :]  # shape: (n_freqs,)
+
+        freqs = con_obj.freqs  # array of shape (n_freqs,)
+
+        # extract group‐labels as dict
+        grp_dict = {}
+        if isinstance(combo, tuple):
+            for col, val in zip(group_cols, combo):
+                grp_dict[col] = val
+        else:
+            grp_dict[group_cols[0]] = combo
+
+        # append one row per frequency
+        for f, cval in zip(freqs, data):
+            row = {"freq": float(f), "con": float(cval), **grp_dict}
+            records.append(row)
+
+    return pd.DataFrame(records)
+
+def plot_multi_connectivity_spectrum(
+    df: pd.DataFrame,
+    hue,
+    *,
+    avg_level="all",
+    err_method="sem",             # {"sd","sem","ci",None}
+    plot_individual_points=False,
+    palette="hls",
+    figsize=None,
+):
     """
-    Generate a heatmap of mean connectivity values for a specific frequency band. Used on
-    an existing Axes.
+    Line plot of multivariate connectivity vs. frequency, with optional error bands.
 
-    Parameters:
-    con_df : pandas.DataFrame
-        The DataFrame containing the connectivity data.
-    freq_band : str
-        The frequency band of interest.
-    con_col : str, optional
-        The column name for connectivity values in the DataFrame (default is 'con').
-    vmin : float, optional
-        The minimum value for the colormap (default is 0).
-    vmax : float, optional
-        The maximum value for the colormap (default is 1).
-    fig_title : str, optional
-        The title of the figure (default is '').
-    method : str, optional
-        The connectivity method used (default is '').
-    cmap : str, optional
-        The colormap to use for the heatmap (default is 'viridis').
-    ax : matplotlib.axes.Axes, optional
-        The axes on which to plot the heatmap (default is None).
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of `compute_multi_connectivity_df`. Must contain columns:
+        ["freq","con", <hue>] and, if avg_level="subject", "animal_id".
+    hue : str or list[str]
+        Metadata column(s) used as the grouping variable.
+    avg_level : {"all","subject"}, default "all"
+        If "subject", df has one row per subject/frequency, and we compute mean ± error across subjects.
+        If "all", df has one row per group/frequency and no error is drawn.
+    err_method : {"sd","sem","ci", None}, default "sem"
+        If not None and avg_level="subject", compute and plot error bands:
+          - "sd":   standard deviation across subjects
+          - "sem":  standard error of the mean
+          - "ci":   95% confidence interval (1.96*SEM)
+    plot_individual_points : bool
+        When avg_level="subject", also plot each subject’s spectrum faintly.
+    palette : str or sequence
+        Seaborn palette for the group means.
+    log_freq : bool, default False
+        If True, x-axis (frequency) is log-scaled.
+    figsize : tuple, optional
 
-    Returns: Nothing
+    Returns
+    -------
+    fig, ax
     """
-    # Filter data for the specified frequency band
-    filtered_df = con_df[con_df['band'] == freq_band]
-
-    # Create a pivot table with mean wPLI values
-    pivot_table = filtered_df.pivot_table(index='node1', columns='node2', values=con_col, aggfunc='mean')
-
-    # Ensure the table is symmetric by filling NaN values
-    pivot_table = pivot_table.combine_first(pivot_table.T)
-
-    # Set the diagonal and upper triangle values to NaN
-    for i in range(pivot_table.shape[0]):
-        for j in range(i, pivot_table.shape[1]):
-            pivot_table.iat[i, j] = np.nan
-
-    # Generate heatmap
-    fig = sns.heatmap(pivot_table, cmap=cmap, annot=True, fmt=".2f",  vmin=vmin, vmax=vmax, 
-                      ax=ax, square=True, cbar_kws={'shrink': 0.75})
-    fig.set_title(fig_title)
-
-    cbar = fig.collections[0].colorbar
-    cbar.set_label(f'Mean {method}', fontsize=12)
-    cbar.outline.set_edgecolor('black')
-    cbar.outline.set_linewidth(1)
-
-def plot_con_barplots(con_df, method, grouper, hue_order):
-    """
-        Generate bar plots of connectivity values for each node pair across different frequency bands.
-
-        Parameters:
-        con_df (DataFrame): DataFrame containing the connectivity data.
-        method (str): The connectivity method used (e.g., 'pli', 'wpli').
-
-        Returns:
-        None: This function generates and displays a series of bar plots.
-    """
-    combinations = con_df['node1'] + '-' + con_df['node2']
-    unique_combinations = combinations.unique()
-    
-    fig, axs = plt.subplots(nrows=3, ncols=7, figsize=(35, 15), sharey=True, sharex=True)
-    axs = axs.ravel()
-    
-    for i, combination in enumerate(unique_combinations):
-        # subset the data
-        chan1, chan2 = combination.split('-')
-        data_subset = con_df[(con_df['node1'] == chan1) & (con_df['node2'] == chan2)]
-        
-        sns.barplot(data=data_subset, x="band", y="con", hue=grouper, hue_order=hue_order, ax=axs[i])
-        sns.stripplot(data=data_subset, x="band", y="con", hue=grouper, palette='dark:black', 
-                      hue_order=hue_order, alpha=0.4, dodge=True, legend=False, ax=axs[i])
-        
-        axs[i].set_title(f"Connectivity of {chan1} and {chan2} ({method.upper()})")
-        axs[i].set_xlabel("Frequency band")
-        axs[i].set_ylabel(f"Connectivity ({method.upper()})")
-    
-    plt.subplots_adjust(wspace=0.3, hspace=0.3)
-    plt.tight_layout()
-
-def plot_con_boxplots(con_df, method, grouper, hue_order, stat_results=None):
-    """
-        Generate box plots of connectivity values for each node pair across different 
-            frequency bands, with optional statistical significance markers.
-
-        Parameters:
-        con_df (DataFrame): DataFrame containing the connectivity data.
-        method (str): The connectivity method used (e.g., 'pli', 'wpli').
-        stat_results (DataFrame, optional): DataFrame containing statistical results, 
-            with columns ['Node1', 'Node2', 'Band', 'P-Value'].
-
-        Returns:
-        None: This function generates and displays a series of box plots.
-    """
-
-    combinations = con_df['node1'] + '-' + con_df['node2']
-    unique_combinations = combinations.unique()
-    
-    fig, axs = plt.subplots(nrows=3, ncols=7, figsize=(35, 15), sharey=True, sharex=True)
-    axs = axs.ravel()
-    
-    for i, combination in enumerate(unique_combinations):
-        # subset the data
-        chan1, chan2 = combination.split('-')
-        data_subset = con_df[(con_df['node1'] == chan1) & (con_df['node2'] == chan2)]
-        
-        sns.boxplot(data=data_subset, x="band", y="con", hue=grouper, hue_order=hue_order, ax=axs[i])
-        sns.stripplot(data=data_subset, x="band", y="con", hue=grouper, palette='dark:black', 
-                      hue_order=hue_order, alpha=0.4, dodge=True, legend=False, ax=axs[i])
-        
-        axs[i].set_title(f"Connectivity of {chan1} and {chan2} ({method.upper()})")
-        axs[i].set_xlabel("Frequency band")
-        axs[i].set_ylabel(f"Connectivity ({method.upper()})")
-        axs[i].xaxis.set_tick_params(which='both', labelbottom=True)
-        axs[i].yaxis.set_tick_params(which='both', labelleft=True)
-
-        # Add significance stars if star_results is provided
-        if stat_results is not None:
-            p_val = stat_results[(stat_results['Node1']==chan1) & (stat_results['Node2']==chan2)][['Band','P-Value']]
-            for k, band in enumerate(p_val['Band'].unique()):
-                if p_val[p_val['Band']==band]['P-Value'].values[0] < 0.05:
-                    x_pos = (k+1)*0.2
-                    axs[i].text(band, 1, "*", horizontalalignment='center', verticalalignment='center', 
-                                fontsize=20, color='red')
-
-    plt.subplots_adjust(wspace=0.3, hspace=0.3)
-    plt.tight_layout()
-
-def plot_group_heatmaps(data, method, grouper, cmap='flare', **kwargs):
-
-    """
-        Generate heatmaps of connectivity values for different genotypes across frequency bands,
-          with an optional difference plot.
-
-        Parameters:
-        data (DataFrame): DataFrame containing the connectivity data.
-        method (str): The connectivity method used (e.g., 'pli', 'wpli').
-        cmap (str, optional): Colormap for the heatmaps. Default is 'flare'.
-        plot_diff (bool, optional): If True, plot the percentage difference between genotypes. Default is False.
-        **kwargs: Additional keyword arguments for the heatmap plotting function.
-
-        Returns:
-        None: This function generates and displays a series of heatmaps.
-    """
-    fig, ax = plt.subplots(nrows=2, ncols=5, figsize=(24, 10))
-    
-    freq_bands = {'Delta': (2, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 100)}
-    freq_band_names = freq_bands.keys()
-    groups = data[grouper].unique()
-    
-    # loop through genotypes
-    for i, group in enumerate(groups):
-        group_data = data[data[grouper] == group]
-        for j, band in enumerate(freq_band_names):
-            plot_con_heatmap(group_data, band, cmap=cmap, fig_title=f'{group} - {band} Band', 
-                                method=method, ax=ax[i, j])
-    
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0.25, hspace=-0.1)
-
-def plot_genotype_heatmaps(data, method, cmap='flare', plot_diff = False, **kwargs):
-
-    """
-        Generate heatmaps of connectivity values for different genotypes across frequency bands,
-          with an optional difference plot.
-
-        Parameters:
-        data (DataFrame): DataFrame containing the connectivity data.
-        method (str): The connectivity method used (e.g., 'pli', 'wpli').
-        cmap (str, optional): Colormap for the heatmaps. Default is 'flare'.
-        plot_diff (bool, optional): If True, plot the percentage difference between genotypes. Default is False.
-        **kwargs: Additional keyword arguments for the heatmap plotting function.
-
-        Returns:
-        None: This function generates and displays a series of heatmaps.
-    """
-    if plot_diff:
-        fig, ax = plt.subplots(nrows=3, ncols=5, figsize=(24, 15))
-        
-        freq_bands = {'Delta': (2, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 100)}
-        freq_band_names = freq_bands.keys()
-        genotypes = data['genotype'].unique()
-        
-        # loop through genotypes
-        for i, genotype in enumerate(genotypes):
-            genotype_data = data[data['genotype'] == genotype]
-            for j, band in enumerate(freq_band_names):
-                plot_con_heatmap(genotype_data, band, cmap=cmap, fig_title=f'{genotype} - {band} Band', 
-                                 method=method, ax=ax[i, j])
-        
-        # Plot difference heatmaps
-        for j, band in enumerate(freq_band_names):
-            # Caclulate con difference
-            band_data = data[data['band']==band].groupby(['node1', 'node2','genotype'], as_index=False)['con'].mean()
-            band_data = band_data.pivot_table(index=['node1', 'node2'], columns='genotype', values='con').reset_index()
-            band_data['delta_con'] = (band_data['DRD2-KO'] - band_data['DRD2-WT'])/band_data['DRD2-WT'] * 100
-            band_data['band'] = band
-            plot_con_heatmap(band_data, band, con_col='delta_con', cmap='coolwarm', 
-                             fig_title=f'% {method} Difference, {band} Band', method=method, ax=ax[-1, j], **kwargs)
-        plt.tight_layout()
-        plt.subplots_adjust(wspace=0.25, hspace=-0.1)
+    # 0) Composite hue if needed
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    if len(hue_cols) > 1:
+        df["_hue"] = df[hue_cols].agg(tuple, axis=1)
+        hue_plot = "_hue"
+        legend_title = ", ".join(hue_cols)
     else:
-        fig, ax = plt.subplots(nrows=2, ncols=5, figsize=(24, 10))
-        
-        freq_bands = {'Delta': (2, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 100)}
-        freq_band_names = freq_bands.keys()
-        genotypes = data['genotype'].unique()
-        
-        # loop through genotypes
-        for i, genotype in enumerate(genotypes):
-            genotype_data = data[data['genotype'] == genotype]
-            for j, band in enumerate(freq_band_names):
-                plot_con_heatmap(genotype_data, band, cmap=cmap, fig_title=f'{genotype} - {band} Band', 
-                                 method=method, ax=ax[i, j])
-        
-        plt.tight_layout()
-        plt.subplots_adjust(wspace=0.25, hspace=-0.1)
+        hue_plot = hue_cols[0]
+        legend_title = hue_plot
 
-def plot_delta_heatmaps(data, method, cmap='flare', **kwargs):
-    """
-        Generate heatmaps of percentage connectivity differences between genotypes across frequency bands.
+    # 1) Determine unique groups
+    groups = sorted(df[hue_plot].unique())
+    colours = sns.color_palette(palette, n_colors=len(groups))
+    pal = {g: c for g, c in zip(groups, colours)}
 
-        Parameters:
-        data (DataFrame): DataFrame containing the connectivity data.
-        method (str): The connectivity method used (e.g., 'pli', 'wpli').
-        cmap (str, optional): Colormap for the heatmaps. Default is 'flare'.
-        **kwargs: Additional keyword arguments for the heatmap plotting function.
+    # 2) Prepare figure
+    if figsize is None:
+        figsize = (8, 5)
+    fig, ax = plt.subplots(figsize=figsize)
 
-        Returns:
-        None: This function generates and displays a series of heatmaps showing percentage differences.
-    """
-    fig, ax = plt.subplots(nrows=1, ncols=5, figsize=(25, 5))
-    
-    freq_bands = {'Delta': (2, 4), 'Theta': (4, 8), 'Alpha': (8, 13), 'Beta': (13, 30), 'Gamma': (30, 100)}
-    freq_band_names = freq_bands.keys()
+    # 3) For each group, compute freq‐wise mean and error
+    for grp in groups:
+        subg = df[df[hue_plot] == grp]
 
-    for j, band in enumerate(freq_band_names):
-        # Caclulate con difference
-        band_data = data[data['band']==band].groupby(['node1', 'node2','genotype'], as_index=False)['con'].mean()
-        band_data = band_data.pivot_table(index=['node1', 'node2'], columns='genotype', values='con').reset_index()
-        band_data['delta_con'] = (band_data['DRD2-KO'] - band_data['DRD2-WT'])/band_data['DRD2-WT'] * 100
-        band_data['band'] = band
-        plot_con_heatmap(band_data, band, con_col='delta_con', cmap=cmap, 
-                         fig_title=f'% {method} Difference, {band} Band', method=method, ax=ax[j], **kwargs)
+        if avg_level == "subject":
+            # Pivot: rows=subjects, cols=freq, values=con
+            pivot = (
+                subg
+                .pivot_table(
+                    index="animal_id",
+                    columns="freq",
+                    values="con",
+                    aggfunc="mean"
+                )
+            )
+            # Sort frequencies
+            freqs = np.array(pivot.columns)
+            # Each row = one subject's spectrum
+            subj_arr = pivot.values            # shape = (n_subj, n_freqs)
 
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0.25, hspace=-0.1)
+            # Optional: plot each subject's trace faintly
+            if plot_individual_points:
+                for row in subj_arr:
+                    ax.plot(
+                        freqs,
+                        row,
+                        color=pal[grp],
+                        alpha=0.25,
+                        linewidth=0.8
+                    )
 
-# Function to create and plot network graph
-def plot_network(fig, ax, df, positions, title, con_col='con',  cmap='viridis', label='Connectivity'):
-    """
-    Create and plot a network graph based on connectivity data.
-
-    Parameters:
-    - fig (matplotlib.figure.Figure): The figure object.
-    - ax (matplotlib.axes._subplots.AxesSubplot): The axes object to plot on.
-    - df (pandas.DataFrame): DataFrame containing connectivity data 
-        with columns 'node1', 'node2', and the connectivity column (default 'con').
-    - positions (dict): Dictionary with node positions.
-    - title (str): Title of the plot.
-    - con_col (str, optional): Column name in df representing connectivity values. Default is 'con'.
-    - cmap (str, optional): Colormap for the edges. Default is 'viridis'.
-    - label (str, optional): Label for the colorbar. Default is 'Connectivity'.
-
-    Returns:
-    - sm (matplotlib.cm.ScalarMappable): ScalarMappable object for colorbar.
-    """
-    # Normalize the connectivity values for coloring
-    if con_col == 'delta_con':
-        norm = mcolors.Normalize(vmin=-50, vmax=50)
-    else:
-        norm = mcolors.Normalize(vmin=0, vmax=1)
-    cmap = plt.get_cmap(cmap)
-    
-    G = nx.Graph()
-    for _, row in df.iterrows():
-        G.add_edge(row['node1'], row['node2'], weight=row[con_col])
-    
-    # Get edge colors based on connectivity values
-    edge_colors = [cmap(norm(row[con_col])) for _, row in df.iterrows()]
-    
-    edge_widths = [norm(row[con_col]) * 5 for _, row in df.iterrows()]  # Multiply by a factor to adjust thickness
-    
-    nx.draw(G, positions, ax=ax, with_labels=True, node_size=700, node_color='lightblue', 
-            font_size=10, font_weight='bold', edge_color=edge_colors, width=edge_widths)
-    # nx.draw_networkx_edge_labels(G, nx.spring_layout(G),ax=ax,  edge_labels=nx.get_edge_attributes(G, 'weight'))
-    # nx.draw(G, positions, ax=ax, with_labels=True, node_size=700, node_color='lightblue', 
-    #         font_size=10, font_weight='bold', edge_color=edge_colors)
-    ax.set_title(title)
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, ax=ax, label='Connectivity')
-    return sm
-
-# Function to generate grid plot for WT vs KO
-def plot_genotype_networks(data, method, coords, cmap='viridis'):
-    """
-    Generate grid plot comparing WT and KO genotypes across frequency bands.
-
-    Parameters:
-    - data (pandas.DataFrame): DataFrame containing connectivity data 
-        with columns 'genotype', 'band', 'node1', 'node2', and 'con'.
-    - method (str): Method of connectivity calculation.
-    - coords (dict): Dictionary with node positions.
-    - cmap (str, optional): Colormap for the edges. Default is 'viridis'.
-
-    Returns:
-    - None
-    """
-    fig, ax = plt.subplots(nrows=2, ncols=5, figsize=(28, 10))
-    
-    freq_bands = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
-    genotypes = data['genotype'].unique()
-    
-    for i, genotype in enumerate(genotypes):
-        genotype_data = data[data['genotype'] == genotype]
-        for j, band in enumerate(freq_bands):
-            band_data = genotype_data[genotype_data['band'] == band]
-            avg_data = band_data.groupby(['node1', 'node2'], as_index=False)['con'].mean()
-            plot_network(fig, ax[i, j], avg_data, coords, f'{genotype} - {band}', cmap=cmap, label=method)
-    
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0.25, hspace=0.4)
-
-# Function to generate grid plot for WT vs KO
-def plot_delta_networks(data, method, coords, cmap='coolwarm'):
-    """
-    Generate grid plot comparing connectivity differences between WT and KO genotypes across frequency bands.
-
-    Parameters:
-    - data (pandas.DataFrame): DataFrame containing connectivity data 
-        with columns 'band', 'node1', 'node2', 'genotype', and 'con'.
-    - method (str): Method of connectivity calculation.
-    - coords (dict): Dictionary with node positions.
-    - cmap (str, optional): Colormap for the edges. Default is 'coolwarm'.
-
-    Returns:
-    - None
-    """
-    fig, ax = plt.subplots(nrows=1, ncols=5, figsize=(28, 5))
-    
-    freq_bands = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
-
-    for j, band in enumerate(freq_bands):
-        # Caclulate con difference
-        band_data = data[data['band']==band].groupby(['node1', 'node2','genotype'], as_index=False)['con'].mean()
-        band_data = band_data.pivot_table(index=['node1', 'node2'], columns='genotype', values='con').reset_index()
-        band_data['delta_con'] = (band_data['DRD2-KO'] - band_data['DRD2-WT'])/band_data['DRD2-WT'] * 100
-
-        plot_network(fig, ax[j], band_data, coords, f' KO - WT- {band}', con_col='delta_con', cmap=cmap, label=method)
-        band_data['band'] = band
-        all_data = pd.concat([all_data, band_data], ignore_index=True)
-    plt.tight_layout()
-    plt.subplots_adjust(wspace=0.25, hspace=0.4)
-
-def compute_multi_con(data, method, mean_subj = True, **kwargs):
-    """
-    Compute multi-channel connectivity measures.
-
-    Parameters:
-    - data (mne.Epochs): MNE Epochs object containing the data.
-    - method (str): Method of connectivity calculation.
-    - mean_subj (bool, optional): Whether to average connectivity measures for each subject. Default is True.
-    - kwargs: Additional keyword arguments for the connectivity calculation method.
-
-    Returns:
-    - results_df (pandas.DataFrame): DataFrame containing connectivity results 
-        with columns 'animal_id', 'genotype', 'freqs', and 'con'.
-    """
-    results_df = pd.DataFrame()
-
-    if mean_subj:
-        subjects = data.metadata['animal_id'].unique()
-
-        for subject in subjects:
-            subject_data = data[data.metadata['animal_id'] == subject]
-            genotype = subject_data.metadata['genotype'].unique()[0]
-
-            con = spectral_connectivity_epochs(subject_data, method=method, n_jobs=-1, 
-                                               fmin=1, fmax=100, verbose='WARNING', **kwargs)
-
-            results_df = pd.concat([results_df, pd.DataFrame({
-                'animal_id' : subject,
-                'genotype' : genotype,
-                'freqs' : con.freqs,
-                'con' : con.get_data()[0,:]
-            })], ignore_index=True)
-
-        return results_df
-    else:
-        genotypes = data.metadata['genotype'].unique()
-
-        for genotype in genotypes:
-            genotype_data = data[data.metadata['genotype'] == genotype]
-            con = spectral_connectivity_epochs(genotype_data, method=method, n_jobs=-1, 
-                                               fmin=1, fmax=100, verbose='WARNING', **kwargs)
-
-            results_df = pd.concat([results_df, pd.DataFrame({
-                'genotype' : genotype,
-                'freqs' : con.freqs,
-                'con' : con.get_data()[0,:]
-            })], ignore_index=True)
-
-        return results_df
-    
-def con_stats(df, grouper, glabel1, glabel2, test_type='anova', correction=None, only_significant=False, alpha=0.05):
-    """
-    Perform statistical analysis on connectivity data.
-
-    Parameters:
-    - df (pandas.DataFrame): The input DataFrame containing connectivity data.
-    - test_type (str, optional): The type of statistical test to perform. Default is 'anova'.
-        - 'anova': One-way ANOVA
-        - 'ttest': Independent t-test
-        - 'mannwhitney': Mann-Whitney U test
-        - 'ranksums': Wilcoxon rank-sum test
-    - correction (str, optional): The method for multiple comparison correction. Default is None.
-        - None: No correction applied
-        - 'bonferroni': Bonferroni correction
-        - 'holm': Holm-Bonferroni correction
-        - 'fdr_bh': Benjamini-Hochberg correction
-    - only_significant (bool, optional): Whether to include only significant results. Default is False.
-    - alpha (float, optional): The significance level for hypothesis testing. Default is 0.05.
-
-    Returns:
-    - results (pandas.DataFrame): The results of the statistical analysis, including band, node pair,
-      test statistic, p-value, and corrected p-value (if correction is applied).
-
-    Raises:
-    - ValueError: If an invalid test type is specified.
-
-    """
-    from scipy.stats import f_oneway, ttest_ind, mannwhitneyu, ranksums
-    from statsmodels.stats.multitest import multipletests
-    
-    node_pairs = df[['node1', 'node2']].drop_duplicates()
-    results = []
-    
-    # Iterate over each frequency band and node pair
-    for band in df['band'].unique():
-        for _, row in node_pairs.iterrows():
-            node1, node2 = row['node1'], row['node2']
-            
-            # Filter the data for the current band and node pair
-            subset = df[(df['band'] == band) & (df['node1'] == node1) & (df['node2'] == node2)]
-            
-            # Separate the data for WT and KO mice
-            wt_data = subset[subset[grouper] == glabel1]['con']
-            ko_data = subset[subset[grouper] == glabel2]['con']
-            
-            # Ensure there is data for both genotypes
-            if len(wt_data) > 0 and len(ko_data) > 0:
-                if test_type == 'anova':
-                    # Perform one-way ANOVA
-                    stat, p_value = f_oneway(wt_data, ko_data)
-                elif test_type == 'ttest':
-                    # Perform independent t-test
-                    stat, p_value = ttest_ind(wt_data, ko_data)
-                elif test_type == 'mannwhitney':
-                    # Perform Mann-Whitney U test
-                    stat, p_value = mannwhitneyu(wt_data, ko_data)
-                elif test_type == 'ranksums':
-                    # Perform Wilcoxon rank-sum test
-                    stat, p_value = ranksums(wt_data, ko_data)
-                else:
-                    raise ValueError("Invalid test type specified. Use 'anova', 'ttest', 'mannwhitney', or 'ranksums'.")
-                
-                results.append([band, node1, node2, stat, p_value])
+            # Compute group‐mean and error across subjects
+            mean_vals = np.nanmean(subj_arr, axis=0)
+            if err_method == "sd":
+                err_vals = np.nanstd(subj_arr, axis=0)
+            elif err_method == "sem":
+                nsub = np.sum(~np.isnan(subj_arr), axis=0)
+                err_vals = np.nanstd(subj_arr, axis=0) / np.sqrt(nsub)
+            elif err_method == "ci":
+                nsub = np.sum(~np.isnan(subj_arr), axis=0)
+                sem = np.nanstd(subj_arr, axis=0) / np.sqrt(nsub)
+                err_vals = 1.96 * sem
             else:
-                # If data is missing for either genotype, append NaNs
-                raise ValueError("Something is off ")
-                # results.append([band, node1, node2, float('nan'), float('nan')])
+                err_vals = None
 
-    # Convert the results into a DataFrame
-    results = pd.DataFrame(results, columns=['Band', 'Node1', 'Node2', 'Statistic', 'P-Value'])
+        else:  # avg_level == "all"
+            # Each group has exactly one "con" per freq
+            grouped = subg.groupby("freq")["con"].mean()
+            freqs = np.array(grouped.index)
+            mean_vals = grouped.to_numpy()
+            err_vals = None
 
-    if correction:
-        # Apply multiple comparison correction
-        corrected_p_values = multipletests(results['P-Value'], alpha=alpha, method=correction)[1]
-        results['Corrected P-Value'] = corrected_p_values
+        # 4) Plot the mean line (cast label to string to avoid tuple warning)
+        ax.plot(
+            freqs,
+            mean_vals,
+            color=pal[grp],
+            linewidth=2,
+            label=str(grp),
+        )
 
-        if only_significant:
-            results = results[results['Corrected P-Value'] < alpha]
+        # 5) Fill error band if requested
+        if err_vals is not None:
+            ax.fill_between(
+                freqs,
+                mean_vals - err_vals,
+                mean_vals + err_vals,
+                alpha=0.25,
+                color=pal[grp],
+            )
+
+    # 6) Final styling
+    ax.set_xlabel("Frequency (Hz)")
+    ax.set_ylabel("Connectivity")
+    ax.legend(title=legend_title, loc="best")
+    sns.despine(ax=ax)
+    plt.tight_layout()
+    return fig, ax
+
+
+def plot_multi_connectivity_band(
+    df: pd.DataFrame,
+    hue,
+    *,
+    avg_level="all",
+    freq_bands: dict | None = None,
+    plot_type="box",               # "box","bar","violin"
+    plot_individual_points=False,
+    stats="auto",                  # None|"auto"|"ttest"|"anova"|"kruskal"
+    palette="hls",
+    figsize=None,
+    **sns_kwargs,
+):
+    """
+    Categorical plot (bar/box/violin) of multivariate connectivity
+    aggregated into frequency bands, with optional stats.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of `compute_multi_connectivity_df`. Must contain:
+        ["freq","con", <hue>] and, if avg_level="subject", "animal_id".
+    hue : str or list[str]
+        Metadata column(s) used as the grouping variable.
+    avg_level : {"all","subject"}, default "all"
+        How the dataframe was generated: if "subject", df has one row
+        per subject/frequency; if "all", df has one row per group/frequency.
+    freq_bands : dict | None
+        Mapping band→(fmin,fmax). Defaults to Delta…Gamma.
+    plot_type : {"box","bar","violin"}, default "box"
+        Which categorical plot to draw.
+    plot_individual_points : bool
+        Overlay subject-level points (only when avg_level="subject").
+    stats : None | "auto" | "ttest" | "anova" | "kruskal"
+        If not None, run the indicated test *per band* across hue-levels.
+        - "auto": 2 levels→ttest (Welch); >2→ANOVA.
+    palette : seaborn palette name or list
+    figsize : tuple, optional
+    **sns_kwargs : passed to the seaborn call
+
+    Returns
+    -------
+    fig, ax (, stats_df)
+        If `stats` is not None, returns a third output `stats_df` with
+        columns ["band","test","stat","p_value"].
+    """
+    # 0) Default freq_bands
+    if freq_bands is None:
+        freq_bands = {
+            "Delta": (2, 4),
+            "Theta": (4, 8),
+            "Alpha": (8, 13),
+            "Beta":  (13, 30),
+            "Gamma": (30, 100),
+        }
+
+    # 1) Build a composite hue column if needed
+    hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    if len(hue_cols) > 1:
+        df["_hue"] = df[hue_cols].agg(tuple, axis=1)
+        hue_plot = "_hue"
+        legend_title = ", ".join(hue_cols)
     else:
-        if only_significant:
-            results = results[results['P-Value'] < alpha]
+        hue_plot = hue_cols[0]
+        legend_title = hue_plot
 
-    return results
+    # 2) Assign each frequency to a band
+    def freq_to_band(f):
+        for band, (lo, hi) in freq_bands.items():
+            if lo <= f < hi:
+                return band
+        return np.nan
 
+    df["band"] = df["freq"].apply(freq_to_band)
+    band_order = list(freq_bands.keys())
+
+    # 3) Collapse to one row per (hue_plot, [animal_id], band)
+    if avg_level == "subject":
+        # One row per subject × hue × band
+        df_band = (
+            df
+            .groupby([hue_plot, "animal_id", "band"], observed=True)["con"]
+            .mean()
+            .reset_index()
+        )
+    else:  # avg_level == "all"
+        # One row per hue × band
+        df_band = (
+            df
+            .groupby([hue_plot, "band"], observed=True)["con"]
+            .mean()
+            .reset_index()
+        )
+
+    # 4) Warn if individual points requested but avg_level="all"
+    import warnings
+    if avg_level == "all" and plot_individual_points:
+        warnings.warn(
+            "plot_individual_points only valid when avg_level='subject'."
+        )
+
+    # 5) Prepare figure
+    if figsize is None:
+        figsize = (6, 4)
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 6) Plot categorical
+    if plot_type == "box":
+        sns.boxplot(
+            data=df_band,
+            x="band", y="con", hue=hue_plot,
+            order=band_order,
+            palette=palette,
+            ax=ax,
+            **sns_kwargs
+        )
+    elif plot_type == "bar":
+        sns.barplot(
+            data=df_band,
+            x="band", y="con", hue=hue_plot,
+            order=band_order,
+            palette=palette,
+            errorbar="se",
+            ax=ax,
+            **sns_kwargs
+        )
+    else:  # "violin"
+        sns.violinplot(
+            data=df_band,
+            x="band", y="con", hue=hue_plot,
+            order=band_order,
+            palette=palette,
+            cut=0,
+            inner="box",
+            ax=ax,
+            **sns_kwargs
+        )
+
+    # 7) Overlay individual‐subject points if requested
+    if plot_individual_points and avg_level == "subject":
+        sns.stripplot(
+            data=df_band,
+            x="band", y="con", hue=hue_plot,
+            order=band_order,
+            dodge=True,
+            color="palette='dark:black",
+            size=3,
+            alpha=0.5,
+            jitter=False,
+            ax=ax,
+            legend=False
+        )
+
+    # 8) Run stats if requested and annotate
+    stats_df = None
+    if stats is not None:
+        # Only meaningful if avg_level == "subject"
+        if avg_level != "subject":
+            warnings.warn(
+                "Cannot run stats when avg_level='all'; "
+                "skipping statistical tests."
+            )
+        else:
+            # Gather unique hue‐levels
+            levels = sorted(df_band[hue_plot].unique())
+
+            # Decide test once for "auto"
+            if stats == "auto":
+                test_name = "ttest" if len(levels) == 2 else "anova"
+            else:
+                test_name = stats
+
+            records = []
+            for band in band_order:
+                subb = df_band[df_band["band"] == band]
+                arrs = [
+                    subb.loc[subb[hue_plot] == lvl, "con"].values
+                    for lvl in levels
+                ]
+                # Choose test
+                if test_name == "ttest":
+                    stat, pval = stats.ttest_ind(
+                        arrs[0], arrs[1], equal_var=False, nan_policy="omit"
+                    )
+                elif test_name == "anova":
+                    stat, pval = stats.f_oneway(*arrs)
+                elif test_name == "kruskal":
+                    stat, pval = stats.kruskal(*arrs)
+                else:
+                    raise ValueError(f"Unknown stats='{stats}'")
+
+                # record
+                records.append({
+                    "band": band,
+                    "test": test_name,
+                    "stat": stat,
+                    "p_value": pval
+                })
+
+                # annotate stars at top
+                stars = _p_to_stars(pval)
+                y_min, y_max = ax.get_ylim()
+                y_line = y_max * 0.95
+                y_text = y_max * 0.99
+                b_i = band_order.index(band)
+
+                ax.plot(
+                    [b_i - 0.2, b_i + 0.2],
+                    [y_line, y_line],
+                    lw=1.5, color="black"
+                )
+                ax.text(
+                    b_i,
+                    y_text,
+                    stars,
+                    ha="center",
+                    va="bottom",
+                    color="black"
+                )
+
+            stats_df = pd.DataFrame(records)
+
+    # 9) Final formatting
+    ax.set_xlabel("Band")
+    ax.set_ylabel("Connectivity")
+    sns.despine(ax=ax)
+
+    # shared legend
+    handles, labels = ax.get_legend_handles_labels()
+    fig.legend(
+        handles[: len(df_band[hue_plot].unique())],
+        labels[: len(df_band[hue_plot].unique())],
+        title=legend_title,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+    )
+    ax.get_legend().remove()
+
+    plt.tight_layout()
+
+    if stats_df is not None:
+        return fig, ax, stats_df
+    return fig, ax

@@ -1,10 +1,21 @@
 from .utils import row_col_layout, compute_err
 
+from .connectivity import (
+    connectivity_df,
+    plot_connectivity_heatmap,
+    plot_connectivity_categorical,
+    compute_multi_connectivity_df,
+    plot_multi_connectivity_spectrum,
+    plot_multi_connectivity_band,
+)
+
 import mne
 from mne.epochs import BaseEpochs
 
+
 import pandas as pd
 import numpy as np
+import itertools
 
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.decomposition import PCA
@@ -549,7 +560,7 @@ class Epochs:
             ax[i].plot(freq, _psd, color='black', alpha=0.85)
             ax[i].set_title(ch)
             ax[i].set_xlabel('Frequency (Hz)')
-            ax[i].set_ylabel('Power Spectral Density (mV/Hz)')
+            ax[i].set_ylabel('PSD (V$^{2}$/Hz)')
             if log:
                 ax[i].set_yscale('log')
             if err is not None:
@@ -571,7 +582,9 @@ class Epochs:
         plot_individual_points=False,
         bad_channels=None, 
         err_method="sem",          # {"sd","sem","ci",None}
-        palette="tab10",
+        hue_order=None, 
+        plot_type="line", 
+        palette="hls",
         **kwargs,
     ):
         """
@@ -599,6 +612,9 @@ class Epochs:
             Any other keyword arguments are passed straight to `compute_psd_`.
 
         """
+        plot_type = plot_type.lower()
+        if plot_type not in {"line", "box", "bar", "violin"}:
+            raise ValueError("plot_type must be 'line', 'box', 'bar' or 'violin'.")
 
         hue_cols = [hue] if isinstance(hue, str) else list(hue)
         missing  = [c for c in hue_cols if c not in self.metadata.columns]
@@ -626,34 +642,42 @@ class Epochs:
             helper["__subject__"] = self.metadata["animal_id"].values
 
         group_labels   = helper[hue_cols].agg(tuple, axis=1)
-        unique_groups  = sorted(group_labels.unique())
-        colours        = sns.color_palette(palette, n_colors=len(unique_groups))
+        present_groups = list(group_labels.unique())
+        
+        #hue order
+        if hue_order is not None:
+            exp = [tuple([g]) if len(hue_cols) == 1 else tuple(g) for g in hue_order]
+            unknown = [g for g in exp if g not in present_groups]
+            if unknown:
+                raise ValueError(f"hue_order contains unknown group(s): {unknown}")
+            unique_groups = exp
+        else:
+            unique_groups = sorted(present_groups)
+        
+        colours = sns.color_palette(palette, n_colors=len(unique_groups))
+        pal = {g: c for g, c in zip(unique_groups, colours)}
 
-        # containers for results
         mean_dict, err_dict, indiv_dict = {}, {}, {}
-
-        # iterate over groups
         for grp in unique_groups:
-            idx      = group_labels[group_labels == grp].index.to_numpy()
-            grp_psd  = psd[idx]                               # epochs in this grp
+            idx     = group_labels[group_labels == grp].index.to_numpy()
+            grp_psd = psd[idx]                                   # epochs × ch × f
 
             if avg_level == "subject":
-                subj_ids = helper.loc[idx, "__subject__"]
-                subj_means = []
+                subj_ids    = helper.loc[idx, "__subject__"]
+                subj_means  = []
                 for subj in subj_ids.unique():
                     mask = (subj_ids == subj).to_numpy()
                     subj_means.append(np.nanmean(grp_psd[mask], axis=0))  # ch × f
-                subj_means = np.stack(subj_means)                         # subj × ch × f
-                group_mean = np.nanmean(subj_means, axis=0)               # ch × f
-                err        = compute_err(subj_means, err_method)
-                indiv_dict[grp] = subj_means                              # for plotting
-            else:  # avg_level == "all"
-                group_mean = np.nanmean(grp_psd, axis=0)                  # ch × f
-                err        = compute_err(grp_psd, err_method)
-                indiv_dict[grp] = grp_psd                                 # epoch × ch × f
+                indiv = np.stack(subj_means)                   # subj × ch × f
+            else:                                              # "all"
+                indiv = grp_psd                               # epochs × ch × f
 
-            mean_dict[grp] = group_mean
-            err_dict[grp]  = err
+            group_mean = np.nanmean(indiv, axis=0)             # ch × f
+            err = compute_err(indiv, err_method)
+
+            mean_dict[grp]  = group_mean
+            err_dict[grp]   = err
+            indiv_dict[grp] = indiv                            # for plotting
 
         # cache results
         cache_key = (
@@ -668,44 +692,396 @@ class Epochs:
         self.psd_results[cache_key] = dict(freq=freq, mean=mean_dict, err=err_dict)
 
         # plotting – one subplot per channel
+        if plot_type == "line":
+            from itertools import cycle
+            nrows, ncols = row_col_layout(n_channels)
+            fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
+                                    figsize=(4*ncols, 3*nrows))
+            axs = np.atleast_1d(axs).ravel()
+
+            for ch_idx, (ax, ch_name) in enumerate(zip(axs, ch_names)):
+                for grp in unique_groups:
+                    m = mean_dict[grp][ch_idx]
+                    ax.plot(freq, m, color=pal[grp], linewidth=1.8,
+                            label=None if ch_idx else grp)
+                    if err_dict[grp] is not None:
+                        e = err_dict[grp][ch_idx]
+                        ax.fill_between(freq, m-e, m+e, alpha=0.25,
+                                        color=pal[grp])
+
+                    if plot_individual_points:   # faint lines
+                        for l in indiv_dict[grp]:
+                            ax.plot(freq, l[ch_idx], color=pal[grp],
+                                    alpha=0.25, linewidth=.8)
+
+                ax.set(title=ch_name, xlim=(freq.min(), freq.max()),
+                    xlabel="Frequency (Hz)", ylabel="PSD (V$^{2}$/Hz)")
+                ax.set_yscale("log")
+                sns.despine(ax=ax)
+                ax.label_outer()
+
+            handles, labels = axs[0].get_legend_handles_labels()
+            fig.legend(handles, labels, title="Group",
+                    bbox_to_anchor=(1.02, 1), loc="upper left")
+            plt.tight_layout()
+            return fig, axs
+
+        # ----------  categorical (band-level) plot types  ------------
+        # build a long DataFrame with one row per individual × band
+        freq_bands = {
+            "delta": (1, 4),
+            "theta": (4, 8),
+            "alpha": (8, 13),
+            "beta":  (13, 30),
+            "gamma": (30, 100),
+        }
+        band_order = list(freq_bands)
+
+        rows = []
+        for grp in unique_groups:
+            indiv = indiv_dict[grp]   # n_indiv × ch × f
+            n_indiv = indiv.shape[0]
+            for ind_ix in range(n_indiv):
+                for ch_idx, ch_name in enumerate(ch_names):
+                    for band, (fmin, fmax) in freq_bands.items():
+                        mask = (freq >= fmin) & (freq < fmax)
+                        val  = np.nanmean(indiv[ind_ix, ch_idx, mask])
+                        rows.append({
+                            "group": grp,
+                            "channel": ch_name,
+                            "band": band,
+                            "value": val,
+                        })
+        long_df = pd.DataFrame(rows)
+
+        # one subplot per channel
         nrows, ncols = row_col_layout(n_channels)
-        fig, axs = plt.subplots(nrows=nrows, ncols=ncols, figsize=(4*ncols, 3*nrows))
-        axs = np.atleast_1d(axs).ravel()        # always 1-D iterator
+        fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
+                                figsize=(4.5*ncols, 3.5*nrows))
+        axs = np.atleast_1d(axs).ravel()
 
-        for ch_idx, (ax, ch_name) in enumerate(zip(axs, ch_names)):
-            for clr, grp in zip(colours, unique_groups):
-                label = (
-                    ", ".join(f"{c}={v}" for c, v in zip(hue_cols, grp))
-                    if isinstance(grp, tuple) else f"{hue_cols[0]}={grp}"
-                )
-                m = mean_dict[grp][ch_idx]
-                ax.plot(freq, m, color=clr, linewidth=1.8, label=label)
+        plot_kwargs = dict(
+            data=None,
+            x="band", y="value", hue="group",
+            order=band_order,
+            hue_order=unique_groups,
+            palette=pal,
+            ax=None,
+        )
+        for ax, ch_name in zip(axs, ch_names):
+            sub = long_df[long_df["channel"] == ch_name]
+            plot_kwargs.update(dict(data=sub, ax=ax))
 
-                if err_dict[grp] is not None:
-                    e = err_dict[grp][ch_idx]
-                    ax.fill_between(freq, m-e, m+e, alpha=0.25, color=clr)
+            if plot_type == "box":
+                sns.boxplot(
+                    gap=0.2,
+                    **plot_kwargs)
+            elif plot_type == "bar":
+                sns.barplot(estimator=np.mean, errorbar="se", **plot_kwargs)
+            else:  # "violin"
+                sns.violinplot(cut=0, inner="box", **plot_kwargs)
 
-                # optional individual lines
-                if plot_individual_points:
-                    lines = indiv_dict[grp]                               # n × ch × f
-                    for l in lines:
-                        ax.plot(freq, l[ch_idx], color=clr, alpha=0.25, linewidth=0.8)
+            if plot_individual_points:
+                sns.stripplot(data=sub, x="band", y="value", hue="group",
+                            order=band_order, hue_order=unique_groups,
+                            dodge=True, palette='dark:black', size=3, ax=ax,
+                            alpha=.5, legend=False)
 
-            ax.set(
-                title=ch_name,
-                xlabel="Frequency (Hz)",
-                ylabel="PSD (mV/Hz)",
-                xlim=(freq.min(), freq.max()),
-            )
+            ax.set(title=ch_name, xlabel="", ylabel="PSD (V$^{2}$/Hz)")
             ax.set_yscale("log")
-            ax.label_outer()       # only keep outer tick-labels
             sns.despine(ax=ax)
+        
 
-        # single legend outside
+        # tidy legend
         handles, labels = axs[0].get_legend_handles_labels()
-        fig.legend(handles, labels, title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
+        fig.legend(handles[:len(unique_groups)], labels[:len(unique_groups)],
+                title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
+        # remove legend from axes
+        for ax in axs:
+            ax.get_legend().remove()
+        
         plt.tight_layout()
         return fig, axs
+    
+    def compare_con(
+        self,
+        hue,
+        *,
+        method: str,
+        plot_type: str,
+        avg_level: str = "all",
+        freq_bands: dict | None = None,
+        bad_channels: dict | None = None,       # dict: animal_id → [channel1, channel2, …], None→global
+        multivariate_nodes: list | None = None,  # list of channels for multivariate
+        plot_individual_points: bool = False,
+        stats: str | None = None,          # None|"auto"|"ttest"|"anova"|"kruskal"
+        err_method: str | None = "sem",     # only for multivariate "spectrum"
+        palette: str = "hls",
+        figsize=None,
+        vmin: float = 0.0,
+        vmax: float = 1.0,
+        upper: bool = False,                # only for heatmap
+        ylims=None,                         # only for categorical
+        con_kwargs: dict | None = None,
+    ):
+        """
+        Compare connectivity between groups defined by *hue*.
+
+        New params:
+          - bad_channels : dict mapping animal_id → list of channel names to drop.
+                           If key is None, drop those channels for all animals.
+          - multivariate_nodes : list of channel names; for multivariate connectivity,
+                                 only these nodes (minus any global bad) are used. Others are ignored.
+
+        BIVARIATE methods (method ∉ {"mic","mim","cacoh","gc","gc_tr"}):
+          - plot_type="heatmap"       → node×node matrices per group×band
+          - plot_type in {"box","bar","violin"} → categorical per node‐pair×band
+
+        MULTIVARIATE methods (method ∈ {"mic","mim","cacoh","gc","gc_tr"}):
+          - plot_type="spectrum"      → full‐freq curve per group (±error if subject‐level)
+          - plot_type in {"box","bar","violin"} → categorical per band
+
+        Connectivity DataFrames are cached based on:
+          (method, hue, avg_level, freq_bands, bad_channels, multivariate_nodes, con_kwargs)
+
+        Returns
+        -------
+        Depending on combination:
+          - bivariate + "heatmap":       (fig, axes)
+          - bivariate + {"box","bar","violin"}: (fig, axes) or (fig, axes, stats_df)
+          - multivariate + "spectrum":   (fig, ax)
+          - multivariate + {"box","bar","violin"}: (fig, ax) or (fig, ax, stats_df)
+        """
+        import warnings
+        from .connectivity import (
+            connectivity_df,
+            plot_connectivity_heatmap,
+            plot_connectivity_categorical,
+            compute_multi_connectivity_df,
+            plot_multi_connectivity_spectrum,
+            plot_multi_connectivity_band,
+        )
+
+        con_kwargs = con_kwargs or {}
+
+        # 1) Validate inputs
+        hue_cols = [hue] if isinstance(hue, str) else list(hue)
+        missing = [c for c in hue_cols if c not in self.metadata.columns]
+        if missing:
+            raise ValueError(f"Hue column(s) not in metadata: {missing}")
+        if avg_level not in {"all", "subject"}:
+            raise ValueError("avg_level must be 'all' or 'subject'")
+        if avg_level == "subject" and "animal_id" not in self.metadata.columns:
+            raise ValueError("avg_level='subject' requires 'animal_id' in metadata")
+
+        # Default frequency bands
+        if freq_bands is None:
+            freq_bands = {
+                "Delta": (2, 4),
+                "Theta": (4, 8),
+                "Alpha": (8, 13),
+                "Beta":  (13, 30),
+                "Gamma": (30, 100),
+            }
+
+        # Determine if method is multivariate
+        multivariate_methods = {"mic", "mim", "cacoh", "gc", "gc_tr"}
+        is_multi = method in multivariate_methods
+
+        # 2) Validate plot_type compatibility
+        allowed_bi = {"heatmap", "box", "bar", "violin"}
+        allowed_multi = {"spectrum", "box", "bar", "violin"}
+
+        if is_multi:
+            if plot_type not in allowed_multi:
+                raise ValueError(
+                    f"plot_type={plot_type!r} not valid for multivariate method '{method}'"
+                )
+        else:
+            if plot_type not in allowed_bi:
+                raise ValueError(
+                    f"plot_type={plot_type!r} not valid for bivariate method '{method}'"
+                )
+
+        # 3) Build `data_key` for caching (only parameters that affect DataFrame content)
+        #    - method, hue_cols, avg_level, freq_bands, bad_channels, multivariate_nodes, con_kwargs
+        #    We do not include plot_type, stats, err_method, palette, etc. in `data_key`.
+        # Convert bad_channels dict → frozenset of (key,tuple(val))
+        if bad_channels is None:
+            bad_key = None
+        else:
+            items = []
+            for k, v in bad_channels.items():
+                key = None if k is None else k
+                items.append((key, tuple(v)))
+            bad_key = frozenset(items)
+
+        # Convert multivariate_nodes to a sorted tuple or None
+        multi_key = None if multivariate_nodes is None else tuple(sorted(multivariate_nodes))
+        fb_key = tuple(freq_bands.items())
+        ck_key = None if con_kwargs is None else frozenset(con_kwargs.items())
+
+        data_key = (method, tuple(hue_cols), avg_level, fb_key, bad_key, multi_key, ck_key)
+        if not hasattr(self, "con_results"):
+            self.con_results = {}
+
+        # 4) If previously computed, reuse; otherwise compute and cache
+        if data_key in self.con_results:
+            df = self.con_results[data_key]
+        else:
+            # 4a) Compute DataFrame
+            if is_multi:
+                # --- MULTIVARIATE: filter channels & subjects first ---
+
+                # 4a.i) Determine initial set of channels
+                if multivariate_nodes is None:
+                    used_chs = set(self.epochs.ch_names)
+                else:
+                    used_chs = set(multivariate_nodes)
+
+                # 4a.ii) Remove any global bad channels (key=None)
+                global_bad = bad_channels.get(None, []) if bad_channels else []
+                used_chs -= set(global_bad)
+
+                if not used_chs:
+                    raise ValueError("After removing bad_channels, no channels remain for multivariate.")
+
+                # 4a.iii) Build a restricted epochs_sub containing only `used_chs`
+                epochs_sub = self.epochs.copy().pick_channels(sorted(used_chs))
+
+                # 4a.iv) Exclude any subject whose bad channel intersects used_chs
+                if bad_channels:
+                    exclude_animals = []
+                    for animal, chlist in bad_channels.items():
+                        if animal is None:
+                            continue
+                        # If any of that subject’s bad channels is in used_chs, exclude subject
+                        if any(ch in used_chs for ch in chlist):
+                            exclude_animals.append(animal)
+                    if exclude_animals:
+                        mask = ~epochs_sub.metadata["animal_id"].isin(exclude_animals)
+                        epochs_sub = epochs_sub[mask]
+
+                # 4a.v) Now compute multivariate connectivity on epochs_sub
+                df = compute_multi_connectivity_df(
+                    epochs_sub,
+                    method,
+                    hue,
+                    avg_level=avg_level,
+                    freq_bands=freq_bands,
+                    fmin=freq_bands["Delta"][0],
+                    fmax=freq_bands["Gamma"][1],
+                    mode="multitaper",
+                    con_kwargs=con_kwargs,
+                )
+
+            else:
+                # --- BIVARIATE: compute once on full epochs ---
+                df = connectivity_df(
+                    self.epochs,
+                    method,
+                    hue,
+                    avg_level=avg_level,
+                    freq_bands=freq_bands,
+                )
+
+                # 4a.vi) Drop rows involving bad channels
+                if bad_channels:
+                    mask = pd.Series(True, index=df.index)
+
+                    # Remove global bad channels
+                    global_bad = bad_channels.get(None, [])
+                    if global_bad:
+                        mask &= ~(
+                            df["node1"].isin(global_bad) |
+                            df["node2"].isin(global_bad)
+                        )
+
+                    # Remove per‐animal bad channels if avg_level="subject"
+                    if avg_level == "subject":
+                        per_mask = pd.Series(False, index=df.index)
+                        for animal, chlist in bad_channels.items():
+                            if animal is None:
+                                continue
+                            subidx = (df["animal_id"] == animal) & (
+                                df["node1"].isin(chlist) | df["node2"].isin(chlist)
+                            )
+                            per_mask |= subidx
+                        mask &= ~per_mask
+
+                    df = df.loc[mask].reset_index(drop=True)
+
+            # 4b) Cache the resulting DataFrame
+            self.con_results[data_key] = df
+
+        # 5) Dispatch to plotting, using the (now‐filtered) DataFrame `df`
+
+        if not is_multi:
+            # --- A) BIVARIATE MODE ---
+            if plot_type == "heatmap":
+                fig, axes = plot_connectivity_heatmap(
+                    df,
+                    hue,
+                    avg_level=avg_level,
+                    freq_bands=freq_bands,
+                    vmin=vmin,
+                    vmax=vmax,
+                    upper=upper,
+                    cmap=palette,
+                    annot=True,
+                    fmt=".2f",
+                    figsize=figsize,
+                )
+                return fig, axes
+
+            # Categorical per node‐pair × band
+            out = plot_connectivity_categorical(
+                df,
+                hue,
+                avg_level=avg_level,
+                freq_bands=freq_bands,
+                plot_type=plot_type,
+                plot_individual_points=plot_individual_points,
+                stats=stats,
+                palette=palette,
+                figsize=figsize,
+                ylims=ylims,
+                **{}
+            )
+            return out  # (fig, axes) or (fig, axes, stats_df)
+
+        else:
+            # --- B) MULTIVARIATE MODE ---
+            if plot_type == "spectrum":
+                fig, ax = plot_multi_connectivity_spectrum(
+                    df,
+                    hue,
+                    avg_level=avg_level,
+                    err_method=err_method,
+                    plot_individual_points=plot_individual_points,
+                    palette=palette,
+                    figsize=figsize,
+                )
+                return fig, ax
+
+            # Categorical per band
+            out = plot_multi_connectivity_band(
+                df,
+                hue,
+                avg_level=avg_level,
+                freq_bands=freq_bands,
+                plot_type=plot_type,
+                plot_individual_points=plot_individual_points,
+                stats=stats,
+                palette=palette,
+                figsize=figsize,
+                **{}
+            )
+            return out  # (fig, ax) or (fig, ax, stats_df)
+
+        # Should never reach here
+        raise RuntimeError("Unexpected combination in compare_con()")
+
 
     # Clustering methods
     def cluster_data(
