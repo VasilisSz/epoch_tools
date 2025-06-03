@@ -15,10 +15,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import seaborn as sns
-import networkx as nx
 
 import re
-
+import warnings
 from tqdm import tqdm
 
 
@@ -38,7 +37,7 @@ def compute_con(epochs, method, fmin=1, fmax=100, **kwargs):
             The minimum frequency of interest (default is 0).
         fmax : float, optional
             The maximum frequency of interest (default is 100).
-        *kwargs : dict, optional
+        **kwargs : dict, optional
             Additional arguments passed to the spectral_connectivity_epochs function.
 
         Returns:
@@ -248,7 +247,6 @@ def plot_connectivity_heatmap(
     return fig, axes
 
 
-
 def _p_to_stars(p):
     if p < 0.001:
         return "***"
@@ -265,7 +263,7 @@ def compute_connectivity_stats(
     band_order: list[str]
 ) -> pd.DataFrame:
     """
-    Given a tidy connectivity DataFrame with columns
+    Given a connectivity DataFrame with columns
     [node1, node2, band, con, <hue_plot>],
     run the requested tests and return a DataFrame of results.
 
@@ -341,15 +339,22 @@ def plot_connectivity_categorical(
     **sns_kwargs,
 ):
     """
-    … same docstring …
-    Supports multi-column hue by automatically combining them into a
-    single synthetic column.
+    For each node-pair, plot connectivity across bands as a bar/box/violin.
+
+        Parameters
+        ----------
+        epochs, method, hue, avg_level, freq_bands: same as above.
+        plot_type : {"bar","box","violin"}
+        plot_individual_points : bool
+            overlay subject points if avg_level="subject".
+        stats_func : callable or None
+            if provided, called as p = stats_func(sub_df, band), and
+            a red asterisk annotation is drawn for each band.
+        palette : seaborn palette name or list
+        figsize : tuple
+        **sns_kwargs : passed to the main plotting call
     """
-    import warnings
-    import numpy as np
-    import pandas as pd
-    import seaborn as sns
-    import matplotlib.pyplot as plt
+
 
     # 1) df
     # df = connectivity_df(epochs, method, hue,

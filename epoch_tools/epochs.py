@@ -834,11 +834,11 @@ class Epochs:
                                  only these nodes (minus any global bad) are used. Others are ignored.
 
         BIVARIATE methods (method ∉ {"mic","mim","cacoh","gc","gc_tr"}):
-          - plot_type="heatmap"       → node×node matrices per group×band
-          - plot_type in {"box","bar","violin"} → categorical per node‐pair×band
+          - plot_type="heatmap"       → nodexnode matrices per groupxband
+          - plot_type in {"box","bar","violin"} → categorical per node-pairxband
 
         MULTIVARIATE methods (method ∈ {"mic","mim","cacoh","gc","gc_tr"}):
-          - plot_type="spectrum"      → full‐freq curve per group (±error if subject‐level)
+          - plot_type="spectrum"      → full-freq curve per group (±error if subject-level)
           - plot_type in {"box","bar","violin"} → categorical per band
 
         Connectivity DataFrames are cached based on:
@@ -852,7 +852,6 @@ class Epochs:
           - multivariate + "spectrum":   (fig, ax)
           - multivariate + {"box","bar","violin"}: (fig, ax) or (fig, ax, stats_df)
         """
-        import warnings
         from .connectivity import (
             connectivity_df,
             plot_connectivity_heatmap,
@@ -1027,7 +1026,6 @@ class Epochs:
                     vmin=vmin,
                     vmax=vmax,
                     upper=upper,
-                    cmap=palette,
                     annot=True,
                     fmt=".2f",
                     figsize=figsize,
