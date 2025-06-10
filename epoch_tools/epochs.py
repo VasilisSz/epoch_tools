@@ -580,125 +580,152 @@ class Epochs:
         method="welch",
         avg_level="subject",          # {"all", "subject"}
         plot_individual_points=False,
-        bad_channels=None, 
-        err_method="sem",          # {"sd","sem","ci",None}
-        hue_order=None, 
-        plot_type="line", 
+        bad_channels=None,
+        normalize: bool = True,        # NEW: whether to compute relative power
+        err_method="sem",              # {"sd","sem","ci",None}
+        hue_order=None,
+        plot_type="line",
         palette="hls",
         **kwargs,
     ):
         """
-        Compare PSDs between groups defined by *hue* (one or several metadata
-        columns) and plot the group-average spectra.
+        Compare PSDs between groups defined by *hue* and plot the group-average spectra.
 
         Parameters
         ----------
         hue : str | list[str]
-            Column(s) in *self.metadata* that define the groups.
+            Column(s) in `self.metadata` defining the groups.
         channels : list[str] | "all"
-            Channel(s) forwarded to `compute_psd_`.
+            Channels forwarded to `compute_psd_`.
         method : {"multitaper","welch"}
-            PSD estimation method (forwarded).
+            PSD estimation method.
         avg_level : {"all","subject"}
-            - ``"all"``   - average *all* epochs belonging to a group.
-            - ``"subject"`` - first average within each subject
-            (metadata column ``'animal_id'`` **must exist**),
-            then average those subject means.
+            - "all":   average all epochs per group.
+            - "subject": first average within each subject
+              (requires "animal_id" in metadata), then across subjects.
+        plot_individual_points : bool
+            Overlay individual-subject (or epoch) spectra.
+        bad_channels : dict or None
+            Map animal_id → [channels] to exclude from PSD.
+        normalize : bool
+            If True, convert to relative power by dividing each PSD
+            vector by its total power across frequencies.
         err_method : {"sd","sem","ci",None}
-            What to show as shaded error; *None* disables shading.
-        palette : str | sequence
-            Matplotlib / seaborn palette.
+            Shaded error method; None disables shading.
+        hue_order : list or None
+            Explicit order of group levels.
+        plot_type : {"line","box","bar","violin"}
+            "line": full-spectrum per channel.
+            Others: band-wise categorical plot.
+        palette : str or palette
+            Color palette for groups.
         **kwargs
-            Any other keyword arguments are passed straight to `compute_psd_`.
+            Passed to `compute_psd_`.
 
+        Returns
+        -------
+        fig, axes
+            Figure and array of Axes for the requested plot type.
         """
         plot_type = plot_type.lower()
         if plot_type not in {"line", "box", "bar", "violin"}:
             raise ValueError("plot_type must be 'line', 'box', 'bar' or 'violin'.")
 
+        # --- Validate hue columns ---
         hue_cols = [hue] if isinstance(hue, str) else list(hue)
-        missing  = [c for c in hue_cols if c not in self.metadata.columns]
+        missing = [c for c in hue_cols if c not in self.metadata.columns]
         if missing:
             raise ValueError(f"Hue column(s) not in metadata: {missing}")
 
         if avg_level not in {"all", "subject"}:
             raise ValueError("avg_level must be 'all' or 'subject'.")
- 
+
         if channels == "all":
             ch_names = self.epochs.ch_names
         else:
-            ch_names = list(channels)  # ensure list
+            ch_names = list(channels)
         n_channels = len(ch_names)
 
-        # compute PSD (n_epochs × n_channels × n_freqs)
+        # --- Compute PSD ---
         psd, freq = self.compute_psd_(channels=ch_names, method=method, **kwargs)
-        psd       = self._drop_bad_channels(psd, ch_names, bad_channels)
+        psd = self._drop_bad_channels(psd, ch_names, bad_channels)
 
-        # helper DataFrame that maps every epoch to a group + subject
+        # --- Normalize if requested ---
+        if normalize:
+            # divide each spectrum by its total power
+            total_power = np.nansum(psd, axis=-1, keepdims=True)
+            psd = psd / np.where(total_power == 0, np.nan, total_power)
+
+        # --- Build helper DataFrame for grouping ---
         helper = self.metadata[hue_cols].copy().reset_index(drop=True)
         if avg_level == "subject":
             if "animal_id" not in self.metadata.columns:
-                raise ValueError("avg_level='subject' needs 'animal_id' in metadata.")
+                raise ValueError("avg_level='subject' requires 'animal_id' in metadata.")
             helper["__subject__"] = self.metadata["animal_id"].values
 
-        group_labels   = helper[hue_cols].agg(tuple, axis=1)
+        group_labels = helper[hue_cols].agg(tuple, axis=1)
         present_groups = list(group_labels.unique())
-        
-        #hue order
+
+        # --- Determine group order ---
         if hue_order is not None:
-            exp = [tuple([g]) if len(hue_cols) == 1 else tuple(g) for g in hue_order]
+            exp = [
+                tuple([g]) if len(hue_cols) == 1 else tuple(g)
+                for g in hue_order
+            ]
             unknown = [g for g in exp if g not in present_groups]
             if unknown:
                 raise ValueError(f"hue_order contains unknown group(s): {unknown}")
             unique_groups = exp
         else:
             unique_groups = sorted(present_groups)
-        
-        colours = sns.color_palette(palette, n_colors=len(unique_groups))
-        pal = {g: c for g, c in zip(unique_groups, colours)}
 
+        colours = sns.color_palette(palette, n_colors=len(unique_groups))
+        pal = dict(zip(unique_groups, colours))
+
+        # --- Aggregate per group ---
         mean_dict, err_dict, indiv_dict = {}, {}, {}
         for grp in unique_groups:
-            idx     = group_labels[group_labels == grp].index.to_numpy()
-            grp_psd = psd[idx]                                   # epochs × ch × f
+            idx = group_labels[group_labels == grp].index.to_numpy()
+            grp_psd = psd[idx]  # shape: (n_epochs or n_subj, ch, freq)
 
             if avg_level == "subject":
-                subj_ids    = helper.loc[idx, "__subject__"]
-                subj_means  = []
+                subj_ids = helper.loc[idx, "__subject__"]
+                subj_means = []
                 for subj in subj_ids.unique():
                     mask = (subj_ids == subj).to_numpy()
-                    subj_means.append(np.nanmean(grp_psd[mask], axis=0))  # ch × f
-                indiv = np.stack(subj_means)                   # subj × ch × f
-            else:                                              # "all"
-                indiv = grp_psd                               # epochs × ch × f
+                    subj_means.append(np.nanmean(grp_psd[mask], axis=0))
+                indiv = np.stack(subj_means)
+            else:
+                indiv = grp_psd
 
-            group_mean = np.nanmean(indiv, axis=0)             # ch × f
+            group_mean = np.nanmean(indiv, axis=0)
             err = compute_err(indiv, err_method)
 
-            mean_dict[grp]  = group_mean
-            err_dict[grp]   = err
-            indiv_dict[grp] = indiv                            # for plotting
+            mean_dict[grp] = group_mean
+            err_dict[grp] = err
+            indiv_dict[grp] = indiv
 
-        # cache results
+        # --- Cache results ---
         cache_key = (
             tuple(hue_cols),
             tuple(ch_names),
             method,
             avg_level,
+            normalize,
             err_method,
             frozenset(kwargs.items()),
             None if bad_channels is None else frozenset((k, tuple(v)) for k, v in bad_channels.items()),
         )
         self.psd_results[cache_key] = dict(freq=freq, mean=mean_dict, err=err_dict)
 
-        # plotting – one subplot per channel
+        # --- Plotting ---
         if plot_type == "line":
-            from itertools import cycle
             nrows, ncols = row_col_layout(n_channels)
             fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
                                     figsize=(4*ncols, 3*nrows))
             axs = np.atleast_1d(axs).ravel()
 
+            ylabel = "Relative Power" if normalize else "PSD (V²/Hz)"
             for ch_idx, (ax, ch_name) in enumerate(zip(axs, ch_names)):
                 for grp in unique_groups:
                     m = mean_dict[grp][ch_idx]
@@ -708,26 +735,26 @@ class Epochs:
                         e = err_dict[grp][ch_idx]
                         ax.fill_between(freq, m-e, m+e, alpha=0.25,
                                         color=pal[grp])
+                    if plot_individual_points:
+                        for trace in indiv_dict[grp]:
+                            ax.plot(freq, trace[ch_idx],
+                                    color=pal[grp], alpha=0.25, linewidth=0.8)
 
-                    if plot_individual_points:   # faint lines
-                        for l in indiv_dict[grp]:
-                            ax.plot(freq, l[ch_idx], color=pal[grp],
-                                    alpha=0.25, linewidth=.8)
-
-                ax.set(title=ch_name, xlim=(freq.min(), freq.max()),
-                    xlabel="Frequency (Hz)", ylabel="PSD (V$^{2}$/Hz)")
+                ax.set(title=ch_name,
+                       xlim=(freq.min(), freq.max()),
+                       xlabel="Frequency (Hz)",
+                       ylabel=ylabel)
                 ax.set_yscale("log")
                 sns.despine(ax=ax)
                 ax.label_outer()
 
             handles, labels = axs[0].get_legend_handles_labels()
             fig.legend(handles, labels, title="Group",
-                    bbox_to_anchor=(1.02, 1), loc="upper left")
+                       bbox_to_anchor=(1.02, 1), loc="upper left")
             plt.tight_layout()
             return fig, axs
 
-        # ----------  categorical (band-level) plot types  ------------
-        # build a long DataFrame with one row per individual × band
+        # --- Categorical (band‐level) plots ---
         freq_bands = {
             "delta": (1, 4),
             "theta": (4, 8),
@@ -739,13 +766,12 @@ class Epochs:
 
         rows = []
         for grp in unique_groups:
-            indiv = indiv_dict[grp]   # n_indiv × ch × f
-            n_indiv = indiv.shape[0]
-            for ind_ix in range(n_indiv):
+            indiv = indiv_dict[grp]
+            for subj_idx in range(indiv.shape[0]):
                 for ch_idx, ch_name in enumerate(ch_names):
                     for band, (fmin, fmax) in freq_bands.items():
                         mask = (freq >= fmin) & (freq < fmax)
-                        val  = np.nanmean(indiv[ind_ix, ch_idx, mask])
+                        val = np.nanmean(indiv[subj_idx, ch_idx, mask])
                         rows.append({
                             "group": grp,
                             "channel": ch_name,
@@ -754,54 +780,48 @@ class Epochs:
                         })
         long_df = pd.DataFrame(rows)
 
-        # one subplot per channel
         nrows, ncols = row_col_layout(n_channels)
         fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
                                 figsize=(4.5*ncols, 3.5*nrows))
         axs = np.atleast_1d(axs).ravel()
 
         plot_kwargs = dict(
-            data=None,
             x="band", y="value", hue="group",
-            order=band_order,
-            hue_order=unique_groups,
-            palette=pal,
-            ax=None,
+            order=band_order, hue_order=unique_groups,
+            palette=pal
         )
         for ax, ch_name in zip(axs, ch_names):
             sub = long_df[long_df["channel"] == ch_name]
-            plot_kwargs.update(dict(data=sub, ax=ax))
-
             if plot_type == "box":
-                sns.boxplot(
-                    gap=0.2,
-                    **plot_kwargs)
+                sns.boxplot(data=sub, **plot_kwargs, ax=ax)
             elif plot_type == "bar":
-                sns.barplot(estimator=np.mean, errorbar="se", **plot_kwargs)
-            else:  # "violin"
-                sns.violinplot(cut=0, inner="box", **plot_kwargs)
+                sns.barplot(data=sub, estimator=np.mean,
+                            errorbar="se", **plot_kwargs, ax=ax)
+            else:  # violin
+                sns.violinplot(data=sub, cut=0, inner="box",
+                               **plot_kwargs, ax=ax)
 
             if plot_individual_points:
-                sns.stripplot(data=sub, x="band", y="value", hue="group",
-                            order=band_order, hue_order=unique_groups,
-                            dodge=True, palette='dark:black', size=3, ax=ax,
-                            alpha=.5, legend=False)
+                sns.stripplot(data=sub, x="band", y="value",
+                              hue="group", order=band_order,
+                              hue_order=unique_groups,
+                              dodge=True, palette='dark:black',
+                              size=3, alpha=0.5, ax=ax, legend=False)
 
-            ax.set(title=ch_name, xlabel="", ylabel="PSD (V$^{2}$/Hz)")
+            ylabel = "Relative Power" if normalize else "PSD (V²/Hz)"
+            ax.set(title=ch_name, xlabel="", ylabel=ylabel)
             ax.set_yscale("log")
             sns.despine(ax=ax)
-        
 
-        # tidy legend
         handles, labels = axs[0].get_legend_handles_labels()
         fig.legend(handles[:len(unique_groups)], labels[:len(unique_groups)],
-                title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
-        # remove legend from axes
+                   title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
         for ax in axs:
-            ax.get_legend().remove()
-        
+            if ax.get_legend(): ax.get_legend().remove()
+
         plt.tight_layout()
         return fig, axs
+
     
     def compare_con(
         self,
