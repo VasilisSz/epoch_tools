@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 print(find_packages())
 setup(
     name="epoch_tools",
-    version="0.1.4",
+    version="0.1.5",
     author="Vasilis Siozos",
     author_email="v.siozos@rug.nl",
     description="A package for analyzing and clustering EEG epochs",
@@ -13,6 +13,7 @@ setup(
     include_package_data=True,
     install_requires=[
         "mne",
+        "mne_qt_browser",
         "numpy",
         "pandas",
         "matplotlib",
@@ -21,7 +22,6 @@ setup(
         "scikit-learn",
         "shap==0.46.0",
         "umap-learn",
-        "fastcluster",
         "hdbscan",
         "pca",
         "ipywidgets",

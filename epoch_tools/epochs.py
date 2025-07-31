@@ -9,13 +9,6 @@ from .connectivity import (
     plot_multi_connectivity_band,
 )
 
-from .stats import (
-    mass_univariate_test,
-    permutation_cluster,
-    run_mixedlm,
-    plot_stats
-)
-
 import mne
 from mne.epochs import BaseEpochs
 
@@ -589,9 +582,8 @@ class Epochs:
         method="welch",
         avg_level="subject",          # {"all", "subject"}
         plot_individuals=False,
-        stats=False,
-        return_pvals=False,           
-        return_data=False,   
+        stats=False,           
+        return_df=False,   
         bad_channels=None,
         normalize: bool = True,        # NEW: whether to compute relative power
         err_method="sem",              # {"sd","sem","ci",None}
@@ -694,6 +686,15 @@ class Epochs:
             mean_dict = self.psd_results[cache_key]['mean']
             err_dict = self.psd_results[cache_key]['err']
             indiv_dict = self.psd_results[cache_key]['indiv']
+
+            hue_cols = [hue] if isinstance(hue, str) else list(hue)
+            helper = self.metadata[hue_cols].copy().reset_index(drop=True)
+            if avg_level == "subject":
+                helper["__subject__"] = self.metadata["animal_id"].values
+            group_labels = helper[hue_cols].agg(tuple, axis=1)
+            unique_groups = list(mean_dict.keys())
+            colours = sns.color_palette(palette, n_colors=len(unique_groups))
+            pal = dict(zip(unique_groups, colours))
             
         else:
             psd, freq = self.compute_psd_(channels=ch_names, method=method, **kwargs)
