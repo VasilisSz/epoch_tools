@@ -9,9 +9,17 @@ from .connectivity import (
     plot_multi_connectivity_band,
 )
 
+from .stats import (
+    mass_univariate_test,
+    permutation_cluster,
+    run_mixedlm,
+    plot_stats
+)
+
 import mne
 from mne.epochs import BaseEpochs
 
+# from fooof import FOOOF
 
 import pandas as pd
 import numpy as np
@@ -30,6 +38,7 @@ import ipywidgets as widgets
 from IPython.display import display
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_hex
 import seaborn as sns
 
 import pickle
@@ -42,7 +51,7 @@ import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, 
                         module="sklearn.utils.deprecation")
 warnings.filterwarnings("ignore", category=UserWarning, module="umap")
-
+warnings.filterwarnings("ignore", category=PendingDeprecationWarning)
 
 class Epochs:
     def __init__(self, epochs, non_feature_cols=[], 
@@ -579,11 +588,15 @@ class Epochs:
         channels="all",
         method="welch",
         avg_level="subject",          # {"all", "subject"}
-        plot_individual_points=False,
+        plot_individuals=False,
+        stats=False,
+        return_pvals=False,           
+        return_data=False,   
         bad_channels=None,
         normalize: bool = True,        # NEW: whether to compute relative power
         err_method="sem",              # {"sd","sem","ci",None}
         hue_order=None,
+        freq_bands=None,  # dict[str, tuple[float, float]]
         plot_type="line",
         palette="hls",
         **kwargs,
@@ -603,7 +616,7 @@ class Epochs:
             - "all":   average all epochs per group.
             - "subject": first average within each subject
               (requires "animal_id" in metadata), then across subjects.
-        plot_individual_points : bool
+        plot_individuals : bool
             Overlay individual-subject (or epoch) spectra.
         bad_channels : dict or None
             Map animal_id → [channels] to exclude from PSD.
@@ -614,6 +627,15 @@ class Epochs:
             Shaded error method; None disables shading.
         hue_order : list or None
             Explicit order of group levels.
+        freq_bands : dict[str, tuple[float, float]] or None
+            Frequency bands to compute and plot. If None, defaults to:
+            freq_bands = {
+                "delta": (1, 4),
+                "theta": (4, 8),
+                "alpha": (8, 13),
+                "beta":  (13, 30),
+                "gamma": (30, 100),
+            }
         plot_type : {"line","box","bar","violin"}
             "line": full-spectrum per channel.
             Others: band-wise categorical plot.
@@ -628,8 +650,8 @@ class Epochs:
             Figure and array of Axes for the requested plot type.
         """
         plot_type = plot_type.lower()
-        if plot_type not in {"line", "box", "bar", "violin"}:
-            raise ValueError("plot_type must be 'line', 'box', 'bar' or 'violin'.")
+        if plot_type not in {"line", "box", "bar", "violin", 'spectrum'}:
+            raise ValueError("plot_type must be 'line', 'box', 'bar', 'violin' or 'spectrum'.")
 
         # --- Validate hue columns ---
         hue_cols = [hue] if isinstance(hue, str) else list(hue)
@@ -645,67 +667,16 @@ class Epochs:
         else:
             ch_names = list(channels)
         n_channels = len(ch_names)
-
-        # --- Compute PSD ---
-        psd, freq = self.compute_psd_(channels=ch_names, method=method, **kwargs)
-        psd = self._drop_bad_channels(psd, ch_names, bad_channels)
-
-        # --- Normalize if requested ---
-        if normalize:
-            # divide each spectrum by its total power
-            total_power = np.nansum(psd, axis=-1, keepdims=True)
-            psd = psd / np.where(total_power == 0, np.nan, total_power)
-
-        # --- Build helper DataFrame for grouping ---
-        helper = self.metadata[hue_cols].copy().reset_index(drop=True)
-        if avg_level == "subject":
-            if "animal_id" not in self.metadata.columns:
-                raise ValueError("avg_level='subject' requires 'animal_id' in metadata.")
-            helper["__subject__"] = self.metadata["animal_id"].values
-
-        group_labels = helper[hue_cols].agg(tuple, axis=1)
-        present_groups = list(group_labels.unique())
-
-        # --- Determine group order ---
-        if hue_order is not None:
-            exp = [
-                tuple([g]) if len(hue_cols) == 1 else tuple(g)
-                for g in hue_order
-            ]
-            unknown = [g for g in exp if g not in present_groups]
-            if unknown:
-                raise ValueError(f"hue_order contains unknown group(s): {unknown}")
-            unique_groups = exp
-        else:
-            unique_groups = sorted(present_groups)
-
-        colours = sns.color_palette(palette, n_colors=len(unique_groups))
-        pal = dict(zip(unique_groups, colours))
-
-        # --- Aggregate per group ---
-        mean_dict, err_dict, indiv_dict = {}, {}, {}
-        for grp in unique_groups:
-            idx = group_labels[group_labels == grp].index.to_numpy()
-            grp_psd = psd[idx]  # shape: (n_epochs or n_subj, ch, freq)
-
-            if avg_level == "subject":
-                subj_ids = helper.loc[idx, "__subject__"]
-                subj_means = []
-                for subj in subj_ids.unique():
-                    mask = (subj_ids == subj).to_numpy()
-                    subj_means.append(np.nanmean(grp_psd[mask], axis=0))
-                indiv = np.stack(subj_means)
-            else:
-                indiv = grp_psd
-
-            group_mean = np.nanmean(indiv, axis=0)
-            err = compute_err(indiv, err_method)
-
-            mean_dict[grp] = group_mean
-            err_dict[grp] = err
-            indiv_dict[grp] = indiv
-
-        # --- Cache results ---
+        
+        if freq_bands is None:
+            freq_bands = {
+                "delta": (1, 4),
+                "theta": (4, 8),
+                "alpha": (8, 13),
+                "beta":  (13, 30),
+                "gamma": (30, 100),
+            }
+        # Use cache if available, else make it
         cache_key = (
             tuple(hue_cols),
             tuple(ch_names),
@@ -714,10 +685,195 @@ class Epochs:
             normalize,
             err_method,
             frozenset(kwargs.items()),
-            None if bad_channels is None else frozenset((k, tuple(v)) for k, v in bad_channels.items()),
+            None if bad_channels is None
+                    else frozenset((k, tuple(v)) for k, v in bad_channels.items())
         )
-        self.psd_results[cache_key] = dict(freq=freq, mean=mean_dict, err=err_dict)
 
+        if cache_key in self.psd_results:
+            freq = self.psd_results[cache_key]['freq']
+            mean_dict = self.psd_results[cache_key]['mean']
+            err_dict = self.psd_results[cache_key]['err']
+            indiv_dict = self.psd_results[cache_key]['indiv']
+            
+        else:
+            psd, freq = self.compute_psd_(channels=ch_names, method=method, **kwargs)
+            psd = self._drop_bad_channels(psd, ch_names, bad_channels)
+
+
+            if normalize:
+                # divide each spectrum by its total power
+                total_power = np.nansum(psd, axis=-1, keepdims=True)
+                psd = psd / np.where(total_power == 0, np.nan, total_power)
+
+            # --- Build helper DataFrame for grouping ---
+            helper = self.metadata[hue_cols].copy().reset_index(drop=True)
+            if avg_level == "subject":
+                if "animal_id" not in self.metadata.columns:
+                    raise ValueError("avg_level='subject' requires 'animal_id' in metadata.")
+                helper["__subject__"] = self.metadata["animal_id"].values
+
+            group_labels = helper[hue_cols].agg(tuple, axis=1)
+            present_groups = list(group_labels.unique())
+
+            # --- Determine group order ---
+            if hue_order is not None:
+                exp = [
+                    tuple([g]) if len(hue_cols) == 1 else tuple(g)
+                    for g in hue_order
+                ]
+                unknown = [g for g in exp if g not in present_groups]
+                if unknown:
+                    raise ValueError(f"hue_order contains unknown group(s): {unknown}")
+                unique_groups = exp
+            else:
+                unique_groups = sorted(present_groups)
+
+            colours = sns.color_palette(palette, n_colors=len(unique_groups))
+            pal = dict(zip(unique_groups, colours))
+
+            # --- Aggregate per group ---
+            mean_dict, err_dict, indiv_dict = {}, {}, {}
+            for grp in unique_groups:
+                idx = group_labels[group_labels == grp].index.to_numpy()
+                grp_psd = psd[idx]  # shape: (n_epochs or n_subj, ch, freq)
+
+                if avg_level == "subject":
+                    subj_ids = helper.loc[idx, "__subject__"]
+                    subj_means = []
+                    for subj in subj_ids.unique():
+                        mask = (subj_ids == subj).to_numpy()
+                        subj_means.append(np.nanmean(grp_psd[mask], axis=0))
+                    indiv = np.stack(subj_means)
+                else:
+                    indiv = grp_psd
+
+                group_mean = np.nanmean(indiv, axis=0)
+                err = compute_err(indiv, err_method)
+
+                mean_dict[grp] = group_mean
+                err_dict[grp] = err
+                indiv_dict[grp] = indiv
+
+            # Cache the results
+            self.psd_results[cache_key] = dict(freq=freq, 
+                                               mean=mean_dict, 
+                                               err=err_dict,
+                                               indiv=indiv_dict)
+            
+        # Plotting ------------------------------------------------------------
+
+        if plot_type in ["spectrum", "line"]:
+            rows = []
+            for grp in unique_groups:
+                arr = indiv_dict[grp]  # shape (n_units, n_channels, n_freqs)
+                # get subjects in same order as rows of arr
+                if avg_level == "subject":
+                    idx = group_labels[group_labels == grp].index
+                    subj_list = helper.loc[idx, "__subject__"]\
+                                         .drop_duplicates()\
+                                         .tolist()
+                else:
+                    subj_list = [None] * arr.shape[0]
+
+                for unit_idx in range(arr.shape[0]):
+                    subject = subj_list[unit_idx]
+                    for i_ch, ch_name in enumerate(ch_names):
+                        for f, val in zip(freq, arr[unit_idx, i_ch, :]):
+                            rows.append({
+                                "group":   grp,
+                                "subject": subject,
+                                "channel": ch_name,
+                                "freq":    f,
+                                "value":   val,
+                            })
+            data_df = pd.DataFrame(rows)
+
+        else:  # box, bar, violin
+            # categorical: build band‐level table
+
+            rows = []
+            for grp in unique_groups:
+                indiv = indiv_dict[grp]
+                # subject list in same order as indiv
+                if avg_level == "subject":
+                    idx = group_labels[group_labels == grp].index
+                    subj_list = helper.loc[idx, "__subject__"]\
+                                         .drop_duplicates()\
+                                         .tolist()
+                else:
+                    subj_list = [None] * indiv.shape[0]
+
+                for subj_idx in range(indiv.shape[0]):
+                    subject = subj_list[subj_idx]
+                    for ch_idx, ch_name in enumerate(ch_names):
+                        for band, (fmin, fmax) in freq_bands.items():
+                            mask = (freq >= fmin) & (freq < fmax)
+                            val = np.nanmean(indiv[subj_idx, ch_idx, mask])
+                            rows.append({
+                                "group":   grp,
+                                "subject": subject,
+                                "channel": ch_name,
+                                "band":    band,
+                                "value":   val,
+                            })
+            data_df = pd.DataFrame(rows)
+
+        stats_df = None
+        if stats:
+            from scipy.stats import ttest_ind, permutation_test
+
+            if plot_type in {"box","bar","violin"}:
+                # for each channel × band, do independent t-test
+                recs = []
+                for ch in data_df["channel"].unique():
+                    for band in data_df["band"].unique():
+                        sub = data_df[(data_df.channel==ch) & (data_df.band==band)]
+                        groups = list(sub["group"].unique())
+                        if len(groups) != 2:
+                            raise ValueError("stats=True categorical plots require exactly 2 groups")
+                        a = sub[sub.group==groups[0]]["value"].dropna()
+                        b = sub[sub.group==groups[1]]["value"].dropna()
+                        t, p = ttest_ind(a, b, equal_var=False, nan_policy="omit")
+                        recs.append({
+                            "channel": ch,
+                            "band": band,
+                            "group1": groups[0],
+                            "group2": groups[1],
+                            "test": "ttest_ind",
+                            "stat": t,
+                            "p_value": p
+                        })
+                stats_df = pd.DataFrame(recs)
+
+            else:  # line plot → permutation test at each freq, per channel
+                recs = []
+                for ch_idx, ch in enumerate(ch_names):
+                    for f in freq:
+                        sub = data_df[(data_df.channel==ch) & (data_df.freq==f)]
+                        groups = list(sub["group"].unique())
+                        if len(groups) != 2:
+                            raise ValueError("stats=True line plot requires exactly 2 groups")
+                        a = sub[sub.group==groups[0]]["value"].values
+                        b = sub[sub.group==groups[1]]["value"].values
+                        # SciPy 1.9+ permutation_test:
+                        res = permutation_test(
+                            (a, b),
+                            statistic=lambda x, y: np.mean(x) - np.mean(y),
+                            permutation_type="independent",
+                            vectorized=False,
+                            n_resamples=1000,
+                            alternative="two-sided",
+                        )
+                        recs.append({
+                            "channel": ch,
+                            "freq": f,
+                            "group1": groups[0],
+                            "group2": groups[1],
+                            "test": "permutation",
+                            "stat": res.statistic,
+                            "p_value": res.pvalue
+                        })
+                stats_df = pd.DataFrame(recs)
         # --- Plotting ---
         if plot_type == "line":
             nrows, ncols = row_col_layout(n_channels)
@@ -735,7 +891,7 @@ class Epochs:
                         e = err_dict[grp][ch_idx]
                         ax.fill_between(freq, m-e, m+e, alpha=0.25,
                                         color=pal[grp])
-                    if plot_individual_points:
+                    if plot_individuals:
                         for trace in indiv_dict[grp]:
                             ax.plot(freq, trace[ch_idx],
                                     color=pal[grp], alpha=0.25, linewidth=0.8)
@@ -745,82 +901,140 @@ class Epochs:
                        xlabel="Frequency (Hz)",
                        ylabel=ylabel)
                 ax.set_yscale("log")
+                if stats and stats_df is not None:
+                    from .connectivity import _p_to_stars
+                    # compute a fixed y-height for stars
+                    _, y_max = ax.get_ylim()
+                    y_text = y_max * 0.90
+                    # loop through all freq-wise stats for this channel
+                    for _, row in stats_df[stats_df["channel"] == ch_name].iterrows():
+                        star = _p_to_stars(row["p_value"])
+                        if star != "ns":
+                            ax.text(
+                                row["freq"],
+                                y_text,
+                                star,
+                                ha="center",
+                                va="bottom",
+                                color="black",
+                                fontsize=8,
+                            )
                 sns.despine(ax=ax)
                 ax.label_outer()
 
             handles, labels = axs[0].get_legend_handles_labels()
             fig.legend(handles, labels, title="Group",
                        bbox_to_anchor=(1.02, 1), loc="upper left")
-            plt.tight_layout()
-            return fig, axs
+            # plt.tight_layout()
+            # return fig, axs
 
-        # --- Categorical (band‐level) plots ---
-        freq_bands = {
-            "delta": (1, 4),
-            "theta": (4, 8),
-            "alpha": (8, 13),
-            "beta":  (13, 30),
-            "gamma": (30, 100),
-        }
-        band_order = list(freq_bands)
+        else:
+            # --- Categorical (band‐level) plots ---
+            freq_bands = {
+                "delta": (1, 4),
+                "theta": (4, 8),
+                "alpha": (8, 13),
+                "beta":  (13, 30),
+                "gamma": (30, 100),
+            }
+            band_order = list(freq_bands)
 
-        rows = []
-        for grp in unique_groups:
-            indiv = indiv_dict[grp]
-            for subj_idx in range(indiv.shape[0]):
-                for ch_idx, ch_name in enumerate(ch_names):
-                    for band, (fmin, fmax) in freq_bands.items():
-                        mask = (freq >= fmin) & (freq < fmax)
-                        val = np.nanmean(indiv[subj_idx, ch_idx, mask])
-                        rows.append({
-                            "group": grp,
-                            "channel": ch_name,
-                            "band": band,
-                            "value": val,
-                        })
-        long_df = pd.DataFrame(rows)
+            rows = []
+            for grp in unique_groups:
+                indiv = indiv_dict[grp]
+                for subj_idx in range(indiv.shape[0]):
+                    for ch_idx, ch_name in enumerate(ch_names):
+                        for band, (fmin, fmax) in freq_bands.items():
+                            mask = (freq >= fmin) & (freq < fmax)
+                            val = np.nanmean(indiv[subj_idx, ch_idx, mask])
+                            rows.append({
+                                "group": grp,
+                                "channel": ch_name,
+                                "band": band,
+                                "value": val,
+                            })
+            long_df = pd.DataFrame(rows)
 
-        nrows, ncols = row_col_layout(n_channels)
-        fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
-                                figsize=(4.5*ncols, 3.5*nrows))
-        axs = np.atleast_1d(axs).ravel()
+            nrows, ncols = row_col_layout(n_channels)
+            fig, axs = plt.subplots(nrows=nrows, ncols=ncols,
+                                    figsize=(4.5*ncols, 3.5*nrows))
+            axs = np.atleast_1d(axs).ravel()
 
-        plot_kwargs = dict(
-            x="band", y="value", hue="group",
-            order=band_order, hue_order=unique_groups,
-            palette=pal
-        )
-        for ax, ch_name in zip(axs, ch_names):
-            sub = long_df[long_df["channel"] == ch_name]
-            if plot_type == "box":
-                sns.boxplot(data=sub, **plot_kwargs, ax=ax)
-            elif plot_type == "bar":
-                sns.barplot(data=sub, estimator=np.mean,
-                            errorbar="se", **plot_kwargs, ax=ax)
-            else:  # violin
-                sns.violinplot(data=sub, cut=0, inner="box",
-                               **plot_kwargs, ax=ax)
+            plot_kwargs = dict(
+                x="band", y="value", hue="group",
+                order=band_order, hue_order=unique_groups,
+                palette=pal
+            )
+            for ax, ch_name in zip(axs, ch_names):
+                sub = long_df[long_df["channel"] == ch_name]
+                if plot_type == "box":
+                    sns.boxplot(data=sub, **plot_kwargs, ax=ax)
+                elif plot_type == "bar":
+                    sns.barplot(data=sub, estimator=np.mean,
+                                errorbar="se", **plot_kwargs, ax=ax)
+                else:  # violin
+                    sns.violinplot(data=sub, cut=0, inner="box",
+                                **plot_kwargs, ax=ax)
 
-            if plot_individual_points:
-                sns.stripplot(data=sub, x="band", y="value",
-                              hue="group", order=band_order,
-                              hue_order=unique_groups,
-                              dodge=True, palette='dark:black',
-                              size=3, alpha=0.5, ax=ax, legend=False)
+                if plot_individuals:
+                    sns.stripplot(data=sub, x="band", y="value",
+                                hue="group", order=band_order,
+                                hue_order=unique_groups,
+                                dodge=True, palette='dark:black',
+                                size=3, alpha=0.5, ax=ax, legend=False)
 
-            ylabel = "Relative Power" if normalize else "PSD (V²/Hz)"
-            ax.set(title=ch_name, xlabel="", ylabel=ylabel)
-            ax.set_yscale("log")
-            sns.despine(ax=ax)
+                ylabel = "Relative Power" if normalize else "PSD (V²/Hz)"
+                ax.set(title=ch_name, xlabel="", ylabel=ylabel)
+                ax.set_yscale("log")
 
-        handles, labels = axs[0].get_legend_handles_labels()
-        fig.legend(handles[:len(unique_groups)], labels[:len(unique_groups)],
-                   title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
-        for ax in axs:
-            if ax.get_legend(): ax.get_legend().remove()
+            if stats and stats_df is not None:
+                from .connectivity import _p_to_stars
+                # get y-axis limits
+                _, y_max = ax.get_ylim()
+                y_line = y_max * 0.90
+                y_text = y_max * 0.95
+                for band in band_order:
+                    pvals = stats_df.loc[
+                        (stats_df["channel"] == ch_name) & (stats_df["band"] == band),
+                        "p_value"
+                    ]
+                    if len(pvals) == 1:
+                        star = _p_to_stars(pvals.iloc[0])
+                        # draw a little horizontal bar
+                        idx = band_order.index(band)
+                        ax.plot(
+                            [idx - 0.2, idx + 0.2],
+                            [y_line, y_line],
+                            lw=1.5,
+                            color="black",
+                        )
+                        # only show star if significant
+                        if star != "ns":
+                            ax.text(
+                                idx,
+                                y_text,
+                                star,
+                                ha="center",
+                                va="bottom",
+                                color="black",
+                            )
+
+                sns.despine(ax=ax)
+
+            handles, labels = axs[0].get_legend_handles_labels()
+            fig.legend(handles[:len(unique_groups)], labels[:len(unique_groups)],
+                    title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
+            for ax in axs:
+                if ax.get_legend(): ax.get_legend().remove()
 
         plt.tight_layout()
-        return fig, axs
+        
+        out = (fig, axs)
+        if stats:
+            out += (stats_df,)
+        if return_df:
+            out += (data_df,)
+        return out
 
     
     def compare_con(
@@ -830,10 +1044,12 @@ class Epochs:
         method: str,
         plot_type: str,
         avg_level: str = "all",
+        hue_order: list | None = None,  # order of hue levels
+        node_order: list | None = None,  # order of nodes (channels)
         freq_bands: dict | None = None,
         bad_channels: dict | None = None,       # dict: animal_id → [channel1, channel2, …], None→global
         multivariate_nodes: list | None = None,  # list of channels for multivariate
-        plot_individual_points: bool = False,
+        plot_individuals: bool = False,
         stats: str | None = None,          # None|"auto"|"ttest"|"anova"|"kruskal"
         err_method: str | None = "sem",     # only for multivariate "spectrum"
         palette: str = "hls",
@@ -879,6 +1095,9 @@ class Epochs:
             compute_multi_connectivity_df,
             plot_multi_connectivity_spectrum,
             plot_multi_connectivity_band,
+            plot_heatmap_diff,
+            compute_bivariate_spectrum_df,
+            plot_bivariate_spectrum,
         )
 
         con_kwargs = con_kwargs or {}
@@ -896,11 +1115,11 @@ class Epochs:
         # Default frequency bands
         if freq_bands is None:
             freq_bands = {
-                "Delta": (2, 4),
-                "Theta": (4, 8),
-                "Alpha": (8, 13),
-                "Beta":  (13, 30),
-                "Gamma": (30, 100),
+                "delta": (2, 4),
+                "theta": (4, 8),
+                "alpha": (8, 13),
+                "beta":  (13, 30),
+                "gamma": (30, 100),
             }
 
         # Determine if method is multivariate
@@ -908,8 +1127,8 @@ class Epochs:
         is_multi = method in multivariate_methods
 
         # 2) Validate plot_type compatibility
-        allowed_bi = {"heatmap", "box", "bar", "violin"}
-        allowed_multi = {"spectrum", "box", "bar", "violin"}
+        allowed_bi = {"heatmap", "box", "bar", "violin", "diff", 'spectrum', 'line'}
+        allowed_multi = {"spectrum", "line", "box", "bar", "violin"}
 
         if is_multi:
             if plot_type not in allowed_multi:
@@ -939,8 +1158,8 @@ class Epochs:
         multi_key = None if multivariate_nodes is None else tuple(sorted(multivariate_nodes))
         fb_key = tuple(freq_bands.items())
         ck_key = None if con_kwargs is None else frozenset(con_kwargs.items())
-
-        data_key = (method, tuple(hue_cols), avg_level, fb_key, bad_key, multi_key, ck_key)
+        plot_key = "spectrum" if plot_type in ["spectrum", "line"] else "not_spectrum"
+        data_key = (method, tuple(hue_cols), avg_level, fb_key, bad_key, multi_key, ck_key, plot_key)
         if not hasattr(self, "con_results"):
             self.con_results = {}
 
@@ -966,7 +1185,7 @@ class Epochs:
                     raise ValueError("After removing bad_channels, no channels remain for multivariate.")
 
                 # 4a.iii) Build a restricted epochs_sub containing only `used_chs`
-                epochs_sub = self.epochs.copy().pick_channels(sorted(used_chs))
+                epochs_sub = self.epochs.copy().pick(sorted(used_chs))
 
                 # 4a.iv) Exclude any subject whose bad channel intersects used_chs
                 if bad_channels:
@@ -995,40 +1214,52 @@ class Epochs:
                 )
 
             else:
-                # --- BIVARIATE: compute once on full epochs ---
-                df = connectivity_df(
-                    self.epochs,
-                    method,
-                    hue,
-                    avg_level=avg_level,
-                    freq_bands=freq_bands,
-                )
-
-                # 4a.vi) Drop rows involving bad channels
-                if bad_channels:
-                    mask = pd.Series(True, index=df.index)
-
-                    # Remove global bad channels
-                    global_bad = bad_channels.get(None, [])
-                    if global_bad:
-                        mask &= ~(
-                            df["node1"].isin(global_bad) |
-                            df["node2"].isin(global_bad)
+                if plot_type in ["spectrum", "line"]:
+                    df = compute_bivariate_spectrum_df(
+                            self.epochs,
+                            method,
+                            hue,
+                            avg_level=avg_level,
+                            fmin=freq_bands["Delta"][0],
+                            fmax=freq_bands["Gamma"][1],
+                            con_kwargs=con_kwargs,
                         )
+                else:
+                    # --- BIVARIATE: compute once on full epochs ---
+                    df = connectivity_df(
+                        self.epochs,
+                        method,
+                        hue,
+                        avg_level=avg_level,
+                        freq_bands=freq_bands,
+                        con_kwargs=con_kwargs,
+                    )
 
-                    # Remove per‐animal bad channels if avg_level="subject"
-                    if avg_level == "subject":
-                        per_mask = pd.Series(False, index=df.index)
-                        for animal, chlist in bad_channels.items():
-                            if animal is None:
-                                continue
-                            subidx = (df["animal_id"] == animal) & (
-                                df["node1"].isin(chlist) | df["node2"].isin(chlist)
+                    # 4a.vi) Drop rows involving bad channels
+                    if bad_channels:
+                        mask = pd.Series(True, index=df.index)
+
+                        # Remove global bad channels
+                        global_bad = bad_channels.get(None, [])
+                        if global_bad:
+                            mask &= ~(
+                                df["node1"].isin(global_bad) |
+                                df["node2"].isin(global_bad)
                             )
-                            per_mask |= subidx
-                        mask &= ~per_mask
 
-                    df = df.loc[mask].reset_index(drop=True)
+                        # Remove per‐animal bad channels if avg_level="subject"
+                        if avg_level == "subject":
+                            per_mask = pd.Series(False, index=df.index)
+                            for animal, chlist in bad_channels.items():
+                                if animal is None:
+                                    continue
+                                subidx = (df["animal_id"] == animal) & (
+                                    df["node1"].isin(chlist) | df["node2"].isin(chlist)
+                                )
+                                per_mask |= subidx
+                            mask &= ~per_mask
+
+                        df = df.loc[mask].reset_index(drop=True)
 
             # 4b) Cache the resulting DataFrame
             self.con_results[data_key] = df
@@ -1041,8 +1272,8 @@ class Epochs:
                 fig, axes = plot_connectivity_heatmap(
                     df,
                     hue,
-                    avg_level=avg_level,
                     freq_bands=freq_bands,
+                    hue_order=hue_order,
                     vmin=vmin,
                     vmax=vmax,
                     upper=upper,
@@ -1051,15 +1282,40 @@ class Epochs:
                     figsize=figsize,
                 )
                 return fig, axes
+            elif plot_type == "diff":
+                fig, axes = plot_heatmap_diff(df,
+                        node_order=node_order,
+                        method='ttest' if not stats in ["ttest", "mixed"] else stats,          # "ttest" | "mixed"
+                        alpha=(0.05, 0.01),      # p-value cut-offs
+                        size_map=(50, 200, 450), # circle sizes
+                        figsize_scale=5,
+                        cmap="coolwarm",
+                        metric=method,
+                        show_diag=False)
+                return fig, axes
 
+            elif plot_type in ['spectrum', 'line']:
+ 
+                fig, axes = plot_bivariate_spectrum(
+                    df,
+                    hue,
+                    avg_level=avg_level,
+                    hue_order=hue_order,
+                    err_method=err_method,
+                    plot_individuals=plot_individuals,
+                    palette=palette,
+                    figsize=figsize,
+                )
+                return fig, axes
             # Categorical per node‐pair × band
             out = plot_connectivity_categorical(
                 df,
                 hue,
                 avg_level=avg_level,
                 freq_bands=freq_bands,
+                hue_order=hue_order,
                 plot_type=plot_type,
-                plot_individual_points=plot_individual_points,
+                plot_individuals=plot_individuals,
                 stats=stats,
                 palette=palette,
                 figsize=figsize,
@@ -1070,13 +1326,14 @@ class Epochs:
 
         else:
             # --- B) MULTIVARIATE MODE ---
-            if plot_type == "spectrum":
+            if plot_type in ["spectrum", "line"]:
                 fig, ax = plot_multi_connectivity_spectrum(
                     df,
                     hue,
                     avg_level=avg_level,
+                    hue_order=hue_order,
                     err_method=err_method,
-                    plot_individual_points=plot_individual_points,
+                    plot_individuals=plot_individuals,
                     palette=palette,
                     figsize=figsize,
                 )
@@ -1087,9 +1344,10 @@ class Epochs:
                 df,
                 hue,
                 avg_level=avg_level,
+                hue_order=hue_order,
                 freq_bands=freq_bands,
                 plot_type=plot_type,
-                plot_individual_points=plot_individual_points,
+                plot_individuals=plot_individuals,
                 stats=stats,
                 palette=palette,
                 figsize=figsize,
@@ -1099,6 +1357,209 @@ class Epochs:
 
         # Should never reach here
         raise RuntimeError("Unexpected combination in compare_con()")
+
+
+    # def compare_fooof(
+    #     self,
+    #     hue,
+    #     *,
+    #     channels="all",
+    #     freq_range=(1, 40),
+    #     peak_width_limits=[1, 8],
+    #     max_n_peaks=6,
+    #     avg_level="subject",               # {"all","subject"}
+    #     metrics=("exponent", "offset"),     # which fooof params to extract
+    #     plot_types=("box", "violin", "bar", "scatter", "kde", "heatmap"),
+    #     plot_type="box",                   # choose one of the above
+    #     err_method="sem",                  # for box/bar/violin
+    #     hue_order=None,
+    #     plot_individual=False,             # overlay individual points
+    #     palette="hls",
+    #     figsize=None,
+    #     return_df=False,
+    #     **fooof_kwargs
+    # ):
+    #     """
+    #     Compare FOOOF-derived aperiodic parameters between groups.
+
+    #     Parameters
+    #     ----------
+    #     hue : str or list[str]
+    #         Column(s) in metadata defining groups.
+    #     channels : 'all' or list[str]
+    #         Channels to include.
+    #     freq_range : tuple
+    #         (fmin, fmax) for FOOOF fit.
+    #     peak_width_limits, max_n_peaks : passed to FOOOF.
+    #     avg_level : {'all','subject'}
+    #         - 'all': treat each epoch separately.
+    #         - 'subject': first average per animal_id, then across.
+    #     metrics : tuple of {'exponent','offset'}
+    #         Which parameters to analyze.
+    #     plot_types : list
+    #         Which plot types are allowed.
+    #     plot_type : str
+    #         One of plot_types.
+    #     err_method : {'sd','sem','ci',None}
+    #     hue_order : list, explicit group order.
+    #     plot_individual : bool
+    #     palette : seaborn palette
+    #     figsize : tuple
+    #     return_df : bool
+    #         If True, also return the DataFrame of extracted params.
+    #     **fooof_kwargs : passed to FOOOF()
+    #     """
+
+    #     # --- validate ---
+    #     hue_cols = [hue] if isinstance(hue, str) else list(hue)
+    #     missing = [c for c in hue_cols if c not in self.metadata.columns]
+    #     if missing:
+    #         raise ValueError(f"Hue column(s) not in metadata: {missing}")
+    #     if avg_level not in {"all", "subject"}:
+    #         raise ValueError("avg_level must be 'all' or 'subject'")
+    #     if plot_type not in plot_types:
+    #         raise ValueError(f"plot_type must be one of {plot_types}")
+
+    #     # --- select channels ---
+    #     if channels == "all":
+    #         ch_names = self.epochs.ch_names
+    #     else:
+    #         ch_names = list(channels)
+
+    #     # --- compute PSD once ---
+    #     psd, freq = self.compute_psd_(channels=ch_names,
+    #                                 method="welch",
+    #                                 fmin=freq_range[0],
+    #                                 fmax=freq_range[1],
+    #                                 n_per_seg=int(self.sfreq),
+    #                                 **fooof_kwargs)
+
+    #     n_epochs, n_ch, n_freq = psd.shape
+    #     freq_mask = (freq >= freq_range[0]) & (freq <= freq_range[1])
+    #     freq_sel = freq[freq_mask]
+    #     psd_sel = psd[..., freq_mask]
+
+    #     # --- run FOOOF per epoch × channel ---
+    #     records = []
+    #     for e in range(n_epochs):
+    #         meta_row = self.metadata.iloc[e].to_dict()
+    #         for ci, ch in enumerate(ch_names):
+    #             spectrum = psd_sel[e, ci, :]
+    #             fm = FOOOF(peak_width_limits=peak_width_limits,
+    #                     max_n_peaks=max_n_peaks,
+    #                     **fooof_kwargs)
+    #             fm.fit(freq_sel, spectrum)
+    #             aperiodic_params = fm.aperiodic_params_  # [offset, exponent]
+    #             for idx, metric in enumerate(("offset", "exponent")):
+    #                 if metric in metrics:
+    #                     records.append({
+    #                         **{c: meta_row[c] for c in hue_cols},
+    #                         **({} if avg_level=="all" else {"animal_id": meta_row.get("animal_id")}),
+    #                         "channel": ch,
+    #                         "metric": metric,
+    #                         "value": aperiodic_params[idx]
+    #                     })
+
+    #     df = pd.DataFrame(records)
+
+    #     # --- average if requested ---
+    #     if avg_level == "subject":
+    #         if "animal_id" not in df.columns:
+    #             raise ValueError("avg_level='subject' requires 'animal_id' in metadata")
+    #         group_cols = hue_cols + ["animal_id", "channel", "metric"]
+    #         df = df.groupby(group_cols, observed=True)["value"].mean().reset_index()
+
+    #     # --- define group order ---
+    #     df["group"] = df[hue_cols].agg(tuple, axis=1) if len(hue_cols)>1 else df[hue_cols[0]]
+    #     groups = df["group"].unique()
+    #     if hue_order:
+    #         # coerce to same tuple format
+    #         exp = [tuple([g]) if len(hue_cols)==1 else tuple(g) for g in hue_order]
+    #         missing = set(exp) - set(groups)
+    #         if missing:
+    #             raise ValueError(f"hue_order contains unknown groups: {missing}")
+    #         groups = exp
+    #     pal = dict(zip(groups, sns.color_palette(palette, len(groups))))
+
+    #     # --- plotting ---
+    #     if plot_type in {"box","violin","bar"}:
+    #         n_met = len(metrics)
+    #         fig, axes = plt.subplots(n_met, 1, figsize=figsize or (6, 4*n_met))
+    #         axes = np.atleast_1d(axes)
+    #         for ax, metric in zip(axes, metrics):
+    #             sub = df[df.metric==metric]
+    #             plot_kws = dict(x="group", y="value", order=groups, palette=pal)
+    #             if plot_type=="box":
+    #                 sns.boxplot(data=sub, **plot_kws, ax=ax)
+    #             elif plot_type=="bar":
+    #                 sns.barplot(data=sub, estimator=np.mean, errorbar=err_method, **plot_kws, ax=ax)
+    #             else:
+    #                 sns.violinplot(data=sub, cut=0, inner="box", **plot_kws, ax=ax)
+
+    #             if plot_individual:
+    #                 sns.stripplot(data=sub, x="group", y="value", order=groups,
+    #                             hue="group", dodge=True, palette="dark:black",
+    #                             size=3, alpha=0.5, ax=ax, legend=False)
+
+    #             ax.set_title(metric.capitalize())
+    #             ax.set_ylabel(metric.capitalize())
+    #             sns.despine(ax=ax)
+    #         plt.tight_layout()
+    #         out = (fig, axes)
+
+    #     elif plot_type == "scatter":
+    #         # exponent vs offset scatter
+    #         if not all(m in metrics for m in ("exponent","offset")):
+    #             raise ValueError("scatter requires both 'exponent' and 'offset' in metrics")
+    #         fig, ax = plt.subplots(figsize=figsize or (6,6))
+    #         df_pivot = df.pivot_table(index=["group","channel"], columns="metric", values="value").reset_index()
+    #         for grp in groups:
+    #             sub = df_pivot[df_pivot.group==grp]
+    #             ax.scatter(sub.exponent, sub.offset, label=str(grp), alpha=0.7, 
+    #                     c=[pal[grp]]*len(sub))
+    #         ax.set_xlabel("Exponent")
+    #         ax.set_ylabel("Offset")
+    #         ax.legend(title="Group")
+    #         sns.despine(ax=ax)
+    #         out = (fig, ax)
+
+    #     elif plot_type == "kde":
+    #         # KDE per metric
+    #         n_met = len(metrics)
+    #         fig, axes = plt.subplots(n_met, 1, figsize=figsize or (6, 4*n_met))
+    #         axes = np.atleast_1d(axes)
+    #         for ax, metric in zip(axes, metrics):
+    #             for grp in groups:
+    #                 sns.kdeplot(data=df[df.metric==metric & (df.group==grp)], x="value",
+    #                             label=str(grp), ax=ax, fill=True, alpha=0.3, color=pal[grp])
+    #             ax.set_title(f"{metric.capitalize()} KDE")
+    #             ax.set_xlabel(metric.capitalize())
+    #             sns.despine(ax=ax)
+    #         plt.tight_layout()
+    #         out = (fig, axes)
+
+    #     elif plot_type == "heatmap":
+    #         # channel × group matrix of exponent (or offset)
+    #         if len(metrics) != 1:
+    #             raise ValueError("heatmap supports exactly one metric")
+    #         metric = metrics[0]
+    #         mat = df[df.metric==metric].pivot_table(index="channel", columns="group", values="value")
+    #         fig, ax = plt.subplots(figsize=figsize or (len(groups)*1.5, len(ch_names)*.5))
+    #         sns.heatmap(mat, ax=ax, cmap="viridis", annot=True, fmt=".2f",
+    #                     cbar_kws=dict(label=metric))
+    #         ax.set_title(f"{metric.capitalize()} by channel × group")
+    #         plt.tight_layout()
+    #         out = (fig, ax)
+
+    #     else:
+    #         raise ValueError(f"Unknown plot_type: {plot_type}")
+
+    #     # cache results
+    #     self.fooof_results = df
+
+    #     if return_df:
+    #         return out + (df,)
+    #     return out
 
 
     # Clustering methods
