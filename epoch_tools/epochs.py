@@ -50,19 +50,25 @@ class Epochs:
     def __init__(self, epochs, non_feature_cols=[], 
                  animal_id=None, condition=None):
         """
-            Initialize an Epochs object.
+        Initialize an Epochs object.
 
-            Parameters:
-            -----------
-            epochs : mne.Epochs
-                The MNE Epochs object to wrap.
-            non_feature_cols : list, optional
-                List of metadata columns to exclude from feature selection.
-            animal_id : str, optional
-                Identifier for the subject (e.g., animal ID).
-            condition : str, optional
-                Experimental condition associated with the epochs.
-        """
+        Parameters
+        ----------
+        epochs : mne.Epochs
+            The MNE Epochs object to wrap.
+        non_feature_cols : list, optional
+            List of metadata columns to exclude from feature selection.
+            Default is empty list.
+        animal_id : str or int, optional
+            Identifier for the subject (e.g., animal ID).
+        condition : str, optional
+            Experimental condition associated with the epochs.
+
+        Raises
+        ------
+        ValueError
+            If epochs is not an MNE Epochs instance.
+    """
         if not isinstance(epochs, BaseEpochs):
             raise ValueError(
                 "The provided object must be an MNE Epochs instance "
@@ -298,23 +304,30 @@ class Epochs:
     def get_features(self, cols=None, scaler='standard',
                      ch_names=None, as_array=False):
         """
-            Extract features from the metadata with optional scaling.
+        Extract and process features from metadata.
 
-            Parameters:
-            -----------
-            cols: list, optional
-                List of feature names to include. Will override features_subset.
-            scaler : str or None, optional
-                Scaling method ('minmax', 'standard', or None).
-            ch_names : list or dict, optional
-                Filter features by specific channel names.
-            as_array : bool, optional
-                Whether to return features as a NumPy array.
+        Parameters
+        ----------
+        cols : list of str, optional
+            Specific columns to extract. If None, uses feature_cols or features_subset.
+        ch_names : dict or list, optional
+            Channel names for filtering/renaming.
+            - If dict: maps old names to new names
+            - If list: filters columns containing these names
+        scaler : {'minmax', 'standard'} or sklearn scaler, optional
+            Scaling method to apply to features.
+        as_array : bool, default False
+            Whether to return features as NumPy array instead of DataFrame.
 
-            Returns:
-            --------
-            pd.DataFrame or np.ndarray
-                The processed feature data.
+        Returns
+        -------
+        pd.DataFrame or np.ndarray
+            The processed feature data.
+
+        Raises
+        ------
+        ValueError
+            If invalid scaler type is provided or ch_names format is incorrect.
         """
 
         feats = self.metadata.copy()
@@ -576,70 +589,133 @@ class Epochs:
 
     def compare_psd(
         self,
-        hue,
+        hue: str | list[str],
         *,
-        channels="all",
-        method="welch",
-        avg_level="subject",          # {"all", "subject"}
-        plot_individuals=False,
-        stats=False,           
-        return_df=False,   
-        bad_channels=None,
-        normalize: bool = True,        # NEW: whether to compute relative power
-        err_method="sem",              # {"sd","sem","ci",None}
-        hue_order=None,
-        freq_bands=None,  # dict[str, tuple[float, float]]
-        plot_type="line",
-        palette="hls",
+        channels: list[str] | str = "all",
+        method: str = "welch",
+        avg_level: str = "subject",
+        hue_order: list | None = None,
+        freq_bands: dict | None = None,
+        plot_type: str = "line",
+        plot_individuals: bool = False,
+        stats: bool = False,
+        err_method: str | None = "sem",
+        palette: str = "hls",
+        normalize: bool = True,
+        bad_channels: dict | None = None,
+        return_df: bool = False,
         **kwargs,
     ):
         """
-        Compare PSDs between groups defined by *hue* and plot the group-average spectra.
-
+        Compare power spectral density (PSD) between groups defined by hue variable(s).
+        
+        This method computes PSD for different groups and generates various types of 
+        comparative visualizations. Results are cached to improve performance on 
+        repeated calls with identical parameters.
+        
         Parameters
         ----------
-        hue : str | list[str]
-            Column(s) in `self.metadata` defining the groups.
-        channels : list[str] | "all"
-            Channels forwarded to `compute_psd_`.
-        method : {"multitaper","welch"}
-            PSD estimation method.
-        avg_level : {"all","subject"}
-            - "all":   average all epochs per group.
-            - "subject": first average within each subject
-              (requires "animal_id" in metadata), then across subjects.
-        plot_individuals : bool
-            Overlay individual-subject (or epoch) spectra.
-        bad_channels : dict or None
-            Map animal_id → [channels] to exclude from PSD.
-        normalize : bool
-            If True, convert to relative power by dividing each PSD
-            vector by its total power across frequencies.
-        err_method : {"sd","sem","ci",None}
-            Shaded error method; None disables shading.
-        hue_order : list or None
-            Explicit order of group levels.
-        freq_bands : dict[str, tuple[float, float]] or None
-            Frequency bands to compute and plot. If None, defaults to:
-            freq_bands = {
-                "delta": (1, 4),
-                "theta": (4, 8),
-                "alpha": (8, 13),
-                "beta":  (13, 30),
-                "gamma": (30, 100),
-            }
-        plot_type : {"line","box","bar","violin"}
-            "line": full-spectrum per channel.
-            Others: band-wise categorical plot.
-        palette : str or palette
-            Color palette for groups.
+        hue : str or list of str
+            Column name(s) in `self.metadata` defining the experimental groups to compare.
+            If multiple columns provided, groups are formed by unique combinations.
+        channels : list of str or "all", default "all"
+            EEG channels to include in analysis. If "all", uses all available channels
+            from `self.epochs.ch_names`.
+        method : {"multitaper", "welch"}, default "welch"
+            PSD estimation method:
+            - "multitaper": Uses multitaper method for spectral estimation
+            - "welch": Uses Welch's method with configurable windowing
+        avg_level : {"all", "subject"}, default "subject"
+            Level of averaging for group comparisons:
+            - "all": Pool all epochs per group and compute single PSD per group
+            - "subject": First average within each subject (requires "animal_id" in metadata),
+            then compute statistics across subjects
+        plot_individuals : bool, default False
+            Whether to overlay individual subject traces (only when avg_level="subject").
+            For avg_level="all", individual epoch traces are shown.
+        stats : bool, default False
+            Whether to perform statistical comparisons between groups:
+            - For line plots: permutation tests at each frequency point
+            - For categorical plots: independent t-tests per band
+            Only supports exactly 2 groups currently.
+        return_df : bool, default False
+            Whether to return the underlying DataFrame used for plotting.
+        bad_channels : dict or None, default None
+            Channels to exclude from analysis. Format: {animal_id: [channel_list]}.
+            Use key `None` to exclude channels globally across all subjects.
+            Example: {123: ["C3", "C4"], None: ["BadCh"]}
+        normalize : bool, default True
+            Whether to convert PSD to relative power by dividing each spectrum
+            by its total power across frequencies.
+        err_method : {"sd", "sem", "ci", None}, default "sem"
+            Error estimation method for group averages:
+            - "sd": Standard deviation
+            - "sem": Standard error of the mean  
+            - "ci": 95% confidence interval (1.96 * SEM)
+            - None: No error bars/shading
+        hue_order : list or None, default None
+            Explicit order for group levels. If None, uses sorted unique values.
+            For multi-column hue, provide list of tuples.
+        freq_bands : dict or None, default None
+            Frequency bands for categorical plots. Format: {band_name: (fmin, fmax)}.
+            Defaults to: {"delta": (1,4), "theta": (4,8), "alpha": (8,13), 
+                        "beta": (13,30), "gamma": (30,100)}
+        plot_type : {"line", "spectrum", "box", "bar", "violin"}, default "line"
+            Type of visualization:
+            - "line"/"spectrum": Full frequency spectrum per channel with group comparison
+            - "box": Box plots of band power per channel  
+            - "bar": Bar plots with error bars of band power per channel
+            - "violin": Violin plots of band power per channel
+        palette : str or sequence, default "hls" 
+            Color palette for groups. Can be seaborn palette name or color sequence.
         **kwargs
-            Passed to `compute_psd_`.
-
+            Additional parameters passed to PSD computation method:
+            - For "welch": n_fft, n_per_seg, etc.
+            - For "multitaper": bandwidth, etc.
+            
         Returns
         -------
-        fig, axes
-            Figure and array of Axes for the requested plot type.
+        fig : matplotlib.figure.Figure
+            The figure object containing the plots.
+        axes : matplotlib.axes.Axes or numpy.ndarray of Axes
+            The axes object(s) for the plots. Shape depends on number of channels.
+        stats_df : pandas.DataFrame, optional
+            Statistical test results (only returned when stats=True).
+            Contains columns: ["channel", "freq"/"band", "group1", "group2", 
+                            "test", "stat", "p_value"]
+        data_df : pandas.DataFrame, optional  
+            Underlying plotting data (only returned when return_df=True).
+            
+        Notes
+        -----
+        - Results are automatically cached based on computation parameters to improve
+        performance on repeated calls
+        - Statistical tests require exactly 2 groups in the hue variable
+        - For line plots with stats, permutation tests are performed at each frequency
+        - For categorical plots with stats, independent t-tests are performed per band
+        - Bad channels are handled by setting their PSD values to NaN before averaging
+        
+        Examples
+        --------
+        Basic PSD comparison between two conditions:
+        
+        >>> fig, axes = epochs.compare_psd(hue="condition", 
+        ...                                channels=["C3", "C4"], 
+        ...                                plot_type="line")
+        
+        Box plot comparison with statistics:
+        
+        >>> fig, axes, stats = epochs.compare_psd(hue="genotype",
+        ...                                        plot_type="box", 
+        ...                                        stats=True,
+        ...                                        avg_level="subject")
+        
+        Multi-factor comparison:
+        
+        >>> fig, axes = epochs.compare_psd(hue=["genotype", "condition"],
+        ...                                plot_type="violin",
+        ...                                hue_order=[("WT", "baseline"), 
+        ...                                          ("KO", "baseline")])
         """
         plot_type = plot_type.lower()
         if plot_type not in {"line", "box", "bar", "violin", 'spectrum'}:
@@ -887,7 +963,7 @@ class Epochs:
                 for grp in unique_groups:
                     m = mean_dict[grp][ch_idx]
                     ax.plot(freq, m, color=pal[grp], linewidth=1.8,
-                            label=None if ch_idx else grp)
+                            label=str(grp) if ch_idx == 0 else None)
                     if err_dict[grp] is not None:
                         e = err_dict[grp][ch_idx]
                         ax.fill_between(freq, m-e, m+e, alpha=0.25,
@@ -1040,25 +1116,25 @@ class Epochs:
     
     def compare_con(
         self,
-        hue,
+        hue: str | list[str],
         *,
         method: str,
         plot_type: str,
         avg_level: str = "all",
-        hue_order: list | None = None,  # order of hue levels
-        node_order: list | None = None,  # order of nodes (channels)
+        hue_order: list | None = None,
+        node_order: list | None = None,
         freq_bands: dict | None = None,
-        bad_channels: dict | None = None,       # dict: animal_id → [channel1, channel2, …], None→global
-        multivariate_nodes: list | None = None,  # list of channels for multivariate
         plot_individuals: bool = False,
-        stats: str | None = None,          # None|"auto"|"ttest"|"anova"|"kruskal"
-        err_method: str | None = "sem",     # only for multivariate "spectrum"
+        stats: str | None = None,
+        err_method: str | None = "sem",
         palette: str = "hls",
-        figsize=None,
+        figsize: tuple | None = None,
+        bad_channels: dict | None = None,
+        multivariate_nodes: list | None = None,
         vmin: float = 0.0,
         vmax: float = 1.0,
-        upper: bool = False,                # only for heatmap
-        ylims=None,                         # only for categorical
+        upper: bool = False,
+        ylims: tuple | None = None,
         con_kwargs: dict | None = None,
     ):
         """
@@ -1208,8 +1284,8 @@ class Epochs:
                     hue,
                     avg_level=avg_level,
                     freq_bands=freq_bands,
-                    fmin=freq_bands["Delta"][0],
-                    fmax=freq_bands["Gamma"][1],
+                    fmin=freq_bands["delta"][0],
+                    fmax=freq_bands["gamma"][1],
                     mode="multitaper",
                     con_kwargs=con_kwargs,
                 )
@@ -1221,8 +1297,8 @@ class Epochs:
                             method,
                             hue,
                             avg_level=avg_level,
-                            fmin=freq_bands["Delta"][0],
-                            fmax=freq_bands["Gamma"][1],
+                            fmin=freq_bands["delta"][0],
+                            fmax=freq_bands["gamma"][1],
                             con_kwargs=con_kwargs,
                         )
                 else:
@@ -1573,35 +1649,44 @@ class Epochs:
         verbose=True
     ):
         """
-            Clusters data based on an optional dimensionality reducer
-            and a chosen clustering algorithm.
+        Apply dimensionality reduction and clustering to feature data.
 
-            TODO: Make it also a standalone method
+        Parameters
+        ----------
+        reducer : {'umap', 'pca', 't-sne'} or None, optional
+            Dimensionality reduction method. If None, no reduction applied.
+        clusterer : {'kmeans', 'hdbscan'}, default 'kmeans'
+            Clustering algorithm to use.
+        reducer_params : dict, optional
+            Parameters for the dimensionality reducer.
+            UMAP example: {"n_neighbors": 15, "min_dist": 0.1, "n_components": 2}
+            PCA example: {"n_components": 2}
+            t-SNE example: {"n_components": 2, "perplexity": 30}
+        clusterer_params : dict, optional
+            Parameters for the clustering algorithm.
+            KMeans example: {"n_clusters": 5, "random_state": 42}
+            HDBSCAN example: {"min_cluster_size": 5, "min_samples": 3}
+        verbose : bool, default True
+            Whether to print clustering results.
 
-            Parameters
-            ----------
-            data : pd.DataFrame or np.ndarray
-                Already scaled feature data. Shape = [n_samples, n_features].
-            reducer : str or None, optional
-                Which dimensionality reducer to use
-                ('umap', 'pca', 't-sne' or None).
-                If None, no dimensionality reduction is applied.
-            clusterer : str, optional
-                Which clustering algorithm to use ('kmeans' or 'hdbscan').
-            reducer_params : dict, optional
-                Dictionary of hyperparameters for the reducer.
-                Example for UMAP: {"n_neighbors": 15, "min_dist": 0.1,
-                                    "n_components": 2, "random_state": 42}
-            clusterer_params : dict, optional
-                Dictionary of hyperparameters for the clusterer.
-                Example for KMeans: {"n_clusters": 5, "random_state": 42}
+        Returns
+        -------
+        np.ndarray
+            Array of cluster labels for each sample.
 
-            Returns
-            -------
-            labels : np.ndarray
-                Array of cluster assignments for each row in `data`.
-            """
-
+        Raises
+        ------
+        ValueError
+            If unsupported reducer or clusterer is specified.
+        
+        Notes
+        -----
+        This method modifies the object's state by setting:
+        - self.labels: cluster assignments
+        - self.dims_df: reduced dimensions
+        - self.reducer: fitted reducer object
+        - self.clusterer: fitted clusterer object
+        """
         data = self.feats.values  # convert to NumPy
 
         # Set defaults if dictionaries are None TODO: Add default values
@@ -2320,14 +2405,34 @@ class Epochs:
     def plot_feature_correlation(self, threshold=0.8, ax=None, 
                                  cmap='coolwarm', vmin=-1, vmax=1, annot=False, fmt='.2f', **kwargs):
         """
-            Plot the correlation matrix of extracted features and mark correlations above a threshold.
+        Plot correlation matrix of features with threshold highlighting.
 
-            Parameters:
-            -----------
-            threshold : float, optional
-                Threshold above which to mark the correlations.
-            ax : matplotlib.axes, optional
-                Axes object to plot on.
+        Parameters
+        ----------
+        threshold : float, default 0.8
+            Threshold above which correlations are marked with '*'.
+        cmap : str, default 'coolwarm'
+            Colormap for the heatmap.
+        vmin, vmax : float, default -1, 1
+            Color scale limits.
+        annot : bool, default False
+            Whether to annotate cells with correlation values.
+        fmt : str, default '.2f'
+            Format string for annotations.
+        ax : matplotlib.axes.Axes, optional
+            Axes object to plot on. If None, creates new figure.
+        **kwargs
+            Additional arguments passed to seaborn.heatmap.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes object containing the plot.
+
+        Raises
+        ------
+        ValueError
+            If features haven't been extracted yet (self.feats is None).
         """
         corr = self.feats.corr()
         if ax is None:
@@ -2378,37 +2483,6 @@ class Epochs:
             raise ValueError("Invalid file extension. Expected '-mne-epo.fif' or '-taini-epo.pkl'.")
         return fname
 
-    def save_epochs(self, fname, overwrite=False):
-        """
-            DEPRECATED:
-            Save the Epochs object.
-
-            Parameters:
-            fname (str): The base filename.
-            overwrite (bool): Whether to overwrite existing files.
-        """
-        # depraecated warning
-        warnings.warn("save_epochs() method is deprecated and will be removed in the next version. Use save_gz() instead.", DeprecationWarning)
-
-        # Validate and extract base filename
-        base_fname = self._parse_base_name(fname)
-        mne_fname = f"{base_fname}-mne-epo.fif"
-        pickle_fname = f"{base_fname}-taini-epo.pkl"
-
-        # Check for overwrite
-        if not overwrite and (os.path.exists(mne_fname) or os.path.exists(pickle_fname)):
-            raise FileExistsError(
-                f"Files '{mne_fname}' or '{pickle_fname}' already exist. Use overwrite=True to overwrite."
-            )
-
-        # Save MNE Epochs
-        self.epochs.save(mne_fname, overwrite=overwrite)
-
-        # Save additional attributes to pickle
-        attributes_to_save = {key: value for key, value in self.__dict__.items() if key != "epochs"}
-        with open(pickle_fname, "wb") as f:
-            pickle.dump(attributes_to_save, f)
-
     @classmethod
     def load_epochs(cls, fname):
         """
@@ -2446,11 +2520,26 @@ class Epochs:
     
     def save_gz(self, fname, overwrite=False):
         """
-        Save the entire object (including MNE Epochs) into a single gzip-compressed file.
-        
-        Parameters:
-            fname (str): Filename for the saved file (e.g., 'my_epochs.gz').
-            overwrite (bool): If False and file exists, raises an error.
+        Save the entire Epochs object to a gzip-compressed file.
+
+        Parameters
+        ----------
+        fname : str
+            Output filename. Must end with '.gz'.
+        overwrite : bool, default False
+            Whether to overwrite existing files.
+
+        Raises
+        ------
+        ValueError
+            If filename doesn't end with '.gz'.
+        FileExistsError
+            If file exists and overwrite is False.
+
+        Notes
+        -----
+        This method saves the complete object including MNE Epochs data,
+        metadata, features, and clustering results using pickle compression.
         """
         # Check filname extension
         if not fname.endswith('.gz'):
@@ -2463,14 +2552,23 @@ class Epochs:
     @classmethod
     def load_gz(cls, fname):
         """
-        Load the object from a gzip-compressed file.
-        
-        Parameters:
-            fname (str): The filename to load (e.g., 'my_epochs.gz').
-            
-        Returns:
-            Epochs: The loaded Epochs object.
-        """
+        Load an Epochs object from a gzip-compressed file.
+
+        Parameters
+        ----------
+        fname : str
+            Input filename ending with '.gz'.
+
+        Returns
+        -------
+        Epochs
+            The loaded Epochs object with all attributes restored.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the specified file doesn't exist.
+    """
         with gzip.open(fname, 'rb') as f:
             obj = pickle.load(f)
         return obj

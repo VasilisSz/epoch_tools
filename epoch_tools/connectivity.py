@@ -879,6 +879,8 @@ def plot_multi_connectivity_spectrum(
         figsize = (8, 5)
     fig, ax = plt.subplots(figsize=figsize)
 
+    err_vals = None
+
     # 3) For each group, compute freq‐wise mean and error
     for grp in groups:
         subg = df[df[hue_plot] == grp]

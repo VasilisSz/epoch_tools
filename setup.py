@@ -32,7 +32,8 @@ setup(
         "openpyxl",
         "opencv-python",
         "ipykernel",
-        "mne_connectivity"
+        "mne_connectivity",
+        "pytest"
 
     ],
     classifiers=[
