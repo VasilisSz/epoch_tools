@@ -357,13 +357,17 @@ class ClusterInterpreter:
         elif isinstance(cmap, list):
             colors = cmap
 
+        # reset index of feats to match epoch indices
+        feats = self.epochs.feats.reset_index(drop=True)
+        labels = self.epochs.labels
+
         # Create a figure without pre-defined axes
         fig = plt.figure(figsize=(6 * n_labels, 4 * n_epochs))
 
         # Loop through the unique labels and plot for each
         for i, label in enumerate(unique_labels):
             # Get the indices of epochs corresponding to the current label
-            label_ids = np.array(self.epochs.feats[self.epochs.labels == label].index)
+            label_ids = np.array(feats[labels == label].index)
 
             random_ids = np.random.choice(label_ids, n_epochs, replace=True)
             # sort the random_ids for better visualization

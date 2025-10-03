@@ -257,43 +257,88 @@ def plot_connectivity_heatmap(
 # ────────────────────────────────────────────────────────────────
 #  Main plotting function
 # ────────────────────────────────────────────────────────────────
+import warnings
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import ttest_ind
+import statsmodels.formula.api as smf
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
 def plot_heatmap_diff(df,
-                          node_order=None,
-                          method="mixed",          # "ttest" | "mixed"
-                          alpha=(0.05, 0.01),      # p-value cut-offs
-                          size_map=(50, 200, 450), # circle sizes
-                          figsize_scale=5,
-                          cmap="coolwarm",
-                          metric="connectivity",
-                          show_diag=False):
+                      node_order=None,
+                      method="mixed",          # "ttest" | "mixed"
+                      alpha=(0.05, 0.01),      # p-value cut-offs
+                      size_map=(50, 200, 450), # circle sizes
+                      figsize_scale=5,
+                      cmap="coolwarm",
+                      metric="connectivity",
+                      show_diag=False,
+                      hue="genotype",          # NEW: which column defines the two groups
+                      group_order=None         # NEW: explicit [group1, group2]; diff = group2 - group1
+                      ):
+    """
+    Plot lower-triangular heatmaps of pairwise differences between two groups in `hue`.
+    The difference is defined as (group_order[1] - group_order[0]) if provided, otherwise
+    a sensible order is inferred. Requires that the hue column has exactly two unique values.
+    """
+
+    # ---------- check & establish groups ----------------------------------
+    if hue not in df.columns:
+        raise ValueError(f'`hue` column "{hue}" not found in df.')
+    uniq = pd.Series(df[hue].dropna().unique())
+    if uniq.nunique() != 2:
+        raise ValueError(f'`hue` column "{hue}" must have exactly two unique levels, found: {list(uniq)}')
+
+    # infer a stable order if not provided: keep WT first when WT/KO present, else lexical
+    if group_order is None:
+        levels = list(uniq)
+        upper = [str(x).upper() for x in levels]
+        if "WT" in "".join(upper) and "KO" in "".join(upper):
+            # put WT first, KO second, preserving original casings
+            g1 = next(l for l in levels if "WT" in str(l).upper())
+            g2 = next(l for l in levels if "KO" in str(l).upper())
+            group_order = [g1, g2]
+        else:
+            group_order = sorted(levels, key=lambda x: str(x))
+    else:
+        if len(group_order) != 2:
+            raise ValueError("`group_order` must be a list/tuple of two group names.")
+        missing = [g for g in group_order if g not in set(uniq)]
+        if missing:
+            raise ValueError(f"`group_order` contains levels not in data: {missing}")
+
+    g1, g2 = group_order  # diff is g2 - g1 throughout
 
     # ---------- tiny helper for one pair ---------------------------------
     def _stats(sub):
-        """Return (diff, p) for KO−WT; NaN,NaN if one group missing."""
-        by_gen = sub.groupby('genotype')['con']
-        # flexibly pick up anything with KO / WT in the label
-        ko_vals = pd.concat([v for g, v in by_gen if "KO" in g.upper()]
-                            ) if any("KO" in g.upper() for g in by_gen.groups) else None
-        wt_vals = pd.concat([v for g, v in by_gen if "WT" in g.upper()]
-                            ) if any("WT" in g.upper() for g in by_gen.groups) else None
-        if ko_vals is None or wt_vals is None:
+        """Return (diff, p) for g2 − g1; NaN,NaN if one group missing."""
+        by_grp = sub.groupby(hue)["con"]
+        if g1 not in by_grp.groups or g2 not in by_grp.groups:
             return np.nan, np.nan
+        vals_g1 = by_grp.get_group(g1)
+        vals_g2 = by_grp.get_group(g2)
 
         if method == "ttest":
-            diff = ko_vals.mean() - wt_vals.mean()
-            _, p = ttest_ind(ko_vals, wt_vals, equal_var=False, nan_policy="omit")
+            diff = vals_g2.mean() - vals_g1.mean()
+            _, p = ttest_ind(vals_g2, vals_g1, equal_var=False, nan_policy="omit")
             return diff, p
 
         if method == "mixed":
+            # Make hue categorical with g1 as reference so the term T.g2 is g2 - g1
+            sub_local = sub.copy()
+            sub_local[hue] = pd.Categorical(sub_local[hue], categories=[g1, g2], ordered=True)
             with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=ConvergenceWarning)
-                mdl = smf.mixedlm("con ~ genotype + batch",
-                                  sub,
-                                  groups=sub["animal_id"]).fit(reml=False, disp=False)
-            diff = ko_vals.mean() - wt_vals.mean()
-            p = mdl.pvalues.get("genotype[T.DRD2-KO]", np.nan)
+                mdl = smf.mixedlm(f"con ~ C({hue}) + batch",
+                                  sub_local,
+                                  groups=sub_local["animal_id"]).fit(reml=False, disp=False)
+            diff = vals_g2.mean() - vals_g1.mean()
+            term = f"C({hue})[T.{g2}]"
+            p = mdl.pvalues.get(term, np.nan)
             return diff, p
-
+    
         raise ValueError('method must be "ttest" or "mixed"')
 
     # ---------- prep ------------------------------------------------------
@@ -306,8 +351,6 @@ def plot_heatmap_diff(df,
     n = len(node_order)
     xs, ys = np.meshgrid(range(n), range(n))
     xs, ys = xs.flatten(), ys.flatten()
-
-    
 
     fig, axes = plt.subplots(1, len(bands),
                              figsize=(figsize_scale * len(bands), figsize_scale),
@@ -350,7 +393,7 @@ def plot_heatmap_diff(df,
         pvals = pval.values.flatten()[keep]
         xplt, yplt = xs[keep], ys[keep]
 
-        vmax = np.nanmax(np.abs(cvals))
+        # sizes by significance
         sizes = np.full_like(pvals, size_map[0], dtype=float)
         sizes[pvals < alpha[0]] = size_map[1]
         sizes[pvals < alpha[1]] = size_map[2]
@@ -358,67 +401,46 @@ def plot_heatmap_diff(df,
         sc = ax.scatter(xplt, yplt, c=cvals, s=sizes,
                         cmap=cmap, vmin=-0.25, vmax=0.25,
                         edgecolors=None)
-        
+
         cbar = fig.colorbar(
             sc,
             ax=ax,
             shrink=0.7,
             pad=0.02,
-            label=f"Δ {metric} (KO - WT)",
+            label=f"Δ {metric} ({g2} − {g1})",
         )
-        # optional: move its ticks & label to the right edge
         cbar.ax.yaxis.set_label_position('right')
         cbar.ax.yaxis.tick_right()
-        # ── draw a square grid in the background ──────────────────────────
-        # major ticks at cell centers
+
+        # ── grid and lower-triangle mask ──
         ax.set_xticks(np.arange(n))
         ax.set_yticks(np.arange(n))
-        # minor ticks at cell boundaries
         ax.set_xticks(np.arange(-.5, n, 1), minor=True)
         ax.set_yticks(np.arange(-.5, n, 1), minor=True)
-
-        # show only the minor‐grid (the outlines)
         ax.grid(which='minor', color='lightgrey', linestyle='-', linewidth=1)
         ax.grid(which='major', visible=False)
 
-        # ── cover the upper‐triangle so you only see the grid under your points ──
         from matplotlib.patches import Polygon
-        # Polygon in data coords: top‐left → top‐right → bottom‐right
         verts = []
-        # start at bottom‐right just outside the grid
         verts.append((n - 0.5, -0.5))
-        # go up to top‐right
         verts.append((n - 0.5, n - 0.5))
-
-        # now walk the “stair” one cell at a time:
-        # each step: move left one cell, then down one cell
         for k in range(n):
             x = n - 0.5 - (k + 1)
             y_up   = n - 0.5 - k
             y_down = n - 0.5 - (k + 1)
             verts.append((x, y_up))
             verts.append((x, y_down))
-
-        # build and add the polygon
-        stair = Polygon(verts,
-                        closed=True,
-                        facecolor='white',
-                        edgecolor='none',
-                        transform=ax.transData,
-                        zorder=2)
+        stair = Polygon(verts, closed=True, facecolor='white', edgecolor='none',
+                        transform=ax.transData, zorder=2)
         ax.add_patch(stair)
 
         ax.set_xticks(range(n)); ax.set_xticklabels(node_order, rotation=90)
         ax.set_yticks(range(n)); ax.set_yticklabels(node_order)
         ax.set_xlim(-.5, n-.5); ax.set_ylim(-.5, n-.5)
-        ax.invert_yaxis()                       # matrix layout
-        # ax.invert_xaxis()                       # matrix layout
+        ax.invert_yaxis()
         ax.set_title(f"{band}")
         any_panel = True
-        # DESPPINE
-        # sns.despine(ax=ax, top=False, bottom=True)
         sns.despine(ax=ax)
-
 
     axes[-1].legend(
         handles=legend,
@@ -426,32 +448,15 @@ def plot_heatmap_diff(df,
         bbox_to_anchor=(1.35, 1),
         loc="upper left",
         borderaxespad=1,
-        labelspacing=1.5,  # increase vertical space between legend entries
-        # remove outline
+        labelspacing=1.5,
         frameon=False
     )
-    #     # if any_panel and sc is not None:
-    # fig.colorbar(sc, ax=axes[-1], shrink=.8, pad=.02,
-    #                 label="Δ connectivity (KO − WT)")
 
-    # # make room on the right for a shared colorbar
-    # fig.subplots_adjust(right=0.85)
-
-    # # draw a single colorbar for all panels
-    # cbar = fig.colorbar(
-    #     sc,
-    #     ax=axes,                  # ← span all subplots
-    #     shrink=0.8,
-    #     pad=0.02,
-    #     label="Δ connectivity (KO - WT)",
-    # )
-    # cbar.ax.yaxis.set_label_position('right')
-    # cbar.ax.yaxis.tick_right()
-
-    fig.suptitle(f"KO - WT {metric}", y=1.02)
+    fig.suptitle(f"{g2} − {g1} {metric}", y=1.02)
     plt.tight_layout()
 
     return fig, axes
+
 
 def _p_to_stars(p):
     if p < 0.001:
@@ -460,7 +465,7 @@ def _p_to_stars(p):
         return "**"
     if p < 0.05:
         return "*"
-    return "ns"
+    return ""
 
 def compute_connectivity_stats(
     df: pd.DataFrame,
@@ -470,16 +475,16 @@ def compute_connectivity_stats(
 ) -> pd.DataFrame:
     """
     Given a connectivity DataFrame with columns
-    [node1, node2, band, con, <hue_plot>],
+    [node1, node2, band, con, <hue_plot>, animal_id],
     run the requested tests and return a DataFrame of results.
 
     Parameters
     ----------
     df : DataFrame
-        Must contain columns ["node1","node2","band","con", hue_plot].
+        Must contain ["node1","node2","band","con", hue_plot, "animal_id"].
     hue_plot : str
-        Column name to treat as the grouping variable.
-    stats : {"auto","ttest","anova","kruskal"}
+        Column name to treat as the grouping variable (must have exactly 2 levels for paired tests).
+    stats : {"auto","ttest","anova","kruskal","ols_cluster","paired_ttest","wilcoxon"}
         Which test(s) to run.
     band_order : list of band names
         The frequency bands to iterate over, in order.
@@ -493,6 +498,13 @@ def compute_connectivity_stats(
     records = []
     levels = sorted(df[hue_plot].unique())
 
+    # make band + group deterministic (helps reference coding)
+    df = df.copy()
+    df["band"] = pd.Categorical(df["band"], categories=band_order, ordered=True)
+    df[hue_plot] = pd.Categorical(df[hue_plot], categories=levels, ordered=True)
+    ref_band = band_order[0]      # baseline band for coding
+    ref_grp, alt_grp = levels[0], levels[1] if len(levels) > 1 else (levels[0], None)
+
     def do_test(arrs, test_name):
         if test_name == "ttest":
             return ss.ttest_ind(arrs[0], arrs[1],
@@ -502,7 +514,24 @@ def compute_connectivity_stats(
         elif test_name == "kruskal":
             return ss.kruskal(*arrs)
         else:
-            raise ValueError(f"Unknown stats='{stats}'")
+            raise ValueError(f"Unknown stats='{test_name}'")
+
+    def do_paired_test(arr1, arr2, test_name):
+        """Perform paired tests, handling NaN values."""
+        # Remove pairs where either value is NaN
+        mask = ~(np.isnan(arr1) | np.isnan(arr2))
+        arr1_clean = arr1[mask]
+        arr2_clean = arr2[mask]
+        
+        if len(arr1_clean) < 2:
+            return np.nan, np.nan
+            
+        if test_name == "paired_ttest":
+            return ss.ttest_rel(arr1_clean, arr2_clean)
+        elif test_name == "wilcoxon":
+            return ss.wilcoxon(arr1_clean, arr2_clean)
+        else:
+            raise ValueError(f"Unknown paired test: '{test_name}'")
 
     # decide test_name once for "auto"
     if stats == "auto":
@@ -510,23 +539,142 @@ def compute_connectivity_stats(
     else:
         test_name = stats
 
-    # loop node‐pairs × bands
-    for (n1, n2), subpair in df.groupby(["node1","node2"]):
-        for band in band_order:
-            subb = subpair[subpair["band"] == band]
-            arrs = [subb.loc[subb[hue_plot] == lvl, "con"].values
-                    for lvl in levels]
-            stat, p = do_test(arrs, test_name)
-            records.append({
-                "node1": n1,
-                "node2": n2,
-                "band":  band,
-                "test":  test_name,
-                "stat":  stat,
-                "p_value": p
-            })
+    # Paired tests
+    if test_name in ["paired_ttest", "wilcoxon"]:
+        if len(levels) != 2:
+            raise ValueError(f"{test_name} requires exactly 2 levels in {hue_plot}, got {len(levels)}")
+        
+        # Check if animal_id exists
+        if "animal_id" not in df.columns:
+            raise ValueError(f"{test_name} requires 'animal_id' column for pairing")
+        
+        for (n1, n2), subpair in df.groupby(["node1","node2"], sort=False):
+            for band in band_order:
+                subb = subpair[subpair["band"] == band]
+                
+                # Pivot to get paired structure
+                pivot = subb.pivot_table(
+                    index="animal_id", 
+                    columns=hue_plot, 
+                    values="con", 
+                    aggfunc="first"
+                )
+                
+                # Check if we have both levels for pairing
+                if ref_grp not in pivot.columns or alt_grp not in pivot.columns:
+                    records.append({
+                        "node1": n1,
+                        "node2": n2,
+                        "band":  band,
+                        "test":  test_name,
+                        "stat":  np.nan,
+                        "p_value": np.nan,
+                        "note": "missing_level"
+                    })
+                    continue
+                
+                arr1 = pivot[ref_grp].values
+                arr2 = pivot[alt_grp].values
+                
+                # Count valid pairs (non-NaN in both)
+                valid_pairs = np.sum(~(np.isnan(arr1) | np.isnan(arr2)))
+                
+                if valid_pairs < 2:
+                    records.append({
+                        "node1": n1,
+                        "node2": n2,
+                        "band":  band,
+                        "test":  test_name,
+                        "stat":  np.nan,
+                        "p_value": np.nan,
+                        "note": f"insufficient_pairs_n={valid_pairs}"
+                    })
+                    continue
+                
+                stat, p = do_paired_test(arr1, arr2, test_name)
+                records.append({
+                    "node1": n1,
+                    "node2": n2,
+                    "band":  band,
+                    "test":  test_name,
+                    "stat":  stat,
+                    "p_value": p,
+                    "note": f"n_pairs={valid_pairs}"
+                })
+        
+        records = pd.DataFrame(records)
+    
+    # OLS cluster
+    elif 'ols' in test_name:
+        # loop per edge; fit once across bands; emit a row per band
+        for (n1, n2), subpair in df.groupby(["node1","node2"], sort=False):
+            # fit: con ~ C(animal_id) + C(group)*C(band)
+            fit = smf.ols(
+                f"con ~ C(animal_id) + C({hue_plot})*C(band)", data=subpair
+            ).fit(cov_type="cluster", cov_kwds={"groups": subpair["animal_id"]})
+            pnames = fit.params.index
 
-    return pd.DataFrame(records)
+            # helper to fetch index (handles term order)
+            def get_idx(termA, termB=None):
+                if termB is None:
+                    return pnames.get_loc(termA)
+                a = f"{termA}:{termB}"
+                b = f"{termB}:{termA}"
+                return pnames.get_loc(a) if a in pnames else pnames.get_loc(b)
+
+            # main effect for alt vs ref (in ref_band)
+            main_name = f"C({hue_plot})[T.{alt_grp}]"
+
+            for band in band_order:
+                # build contrast: (alt − ref) within 'band'
+                L = np.zeros(len(pnames))
+                # KO−WT in ref_band = main effect
+                L[get_idx(main_name)] = 1.0
+                # add interaction for non-reference bands
+                if band != ref_band:
+                    inter_name = f"C(band)[T.{band}]"
+                    L[get_idx(main_name, inter_name)] = 1.0
+
+                tt = fit.t_test(L)
+                records.append({
+                    "node1": n1,
+                    "node2": n2,
+                    "band":  band,
+                    "test":  test_name,
+                    "stat":  float(tt.tvalue),
+                    "p_value": float(tt.pvalue)
+                })
+
+        records = pd.DataFrame(records)
+    else:
+        # simple independent tests
+        for (n1, n2), subpair in df.groupby(["node1","node2"]):
+            for band in band_order:
+                subb = subpair[subpair["band"] == band]
+                arrs = [subb.loc[subb[hue_plot] == lvl, "con"].values
+                        for lvl in levels]
+                stat, p = do_test(arrs, test_name)
+                records.append({
+                    "node1": n1,
+                    "node2": n2,
+                    "band":  band,
+                    "test":  test_name,
+                    "stat":  stat,
+                    "p_value": p
+                })
+        records = pd.DataFrame(records)
+    
+    # multiple testing correction
+    if "multipletest" in test_name:
+        from statsmodels.stats.multitest import multipletests
+        records["q_global"] = multipletests(records["p_value"].fillna(1), method="fdr_bh")[1]
+        records["q_band"] = np.nan
+        for b in band_order:
+            m = records["band"]==b
+            p_vals = records.loc[m, "p_value"].fillna(1)
+            records.loc[m, "q_band"] = multipletests(p_vals, method="fdr_bh")[1]
+
+    return records
 
 def plot_connectivity_categorical(
     df,
@@ -539,7 +687,7 @@ def plot_connectivity_categorical(
     freq_bands=None,
     plot_type="box",       # "bar","box","violin"
     plot_individuals=False,
-    stats='auto',
+    stats=None,               # None, "auto", "ttest", "anova", "kruskal", "ols_cluster"
     palette="hls",
     figsize=None,
     ylims = None,
@@ -554,8 +702,8 @@ def plot_connectivity_categorical(
         plot_type : {"bar","box","violin"}
         plot_individuals : bool
             overlay subject points if avg_level="subject".
-        stats_func : callable or None
-            if provided, called as p = stats_func(sub_df, band), and
+        stats : callable or None
+            if provided, called as p = stats(sub_df, band), and
             a red asterisk annotation is drawn for each band.
         palette : seaborn palette name or list
         figsize : tuple
@@ -659,16 +807,26 @@ def plot_connectivity_categorical(
             for b_i, band in enumerate(band_order):
                 row   = substats[substats.band == band].iloc[0]
                 stars = _p_to_stars(row.p_value)
+                fdr_global_stars = _p_to_stars(row.get("q_global", 1.0))
+                fdr_band_stars = _p_to_stars(row.get("q_band", 1.0))
 
                 # horizontal line at constant height
-                ax.plot([b_i - 0.2, b_i + 0.2],
-                        [y_line, y_line],
-                        lw=1.5, color="black")
+                # ax.plot([b_i - 0.2, b_i + 0.2],
+                #         [y_line, y_line],
+                #         lw=1.5, color="black")
 
                 # text just above it
                 ax.text(b_i, y_text, stars,
                         ha="center", va="bottom",
-                        color="black")
+                        color="black",  fontsize=12)
+                if fdr_global_stars:
+                    ax.text(b_i, y_text - (y_max*0.05), fdr_global_stars,
+                            ha="center", va="bottom",
+                            color="red", fontsize=12)
+                if fdr_band_stars:
+                    ax.text(b_i, y_text - (y_max*0.10), fdr_band_stars,
+                            ha="center", va="bottom",
+                            color="blue", fontsize=12)
 
         ax.set_title(lab)
         ax.set_xlabel("")
@@ -685,6 +843,11 @@ def plot_connectivity_categorical(
     )
     for ax in axes:
         if ax.get_legend(): ax.get_legend().remove()
+
+    # remove unused axes
+    for ax in axes[n:]:
+        ax.set_visible(False)
+
 
     plt.tight_layout()
     
@@ -956,6 +1119,9 @@ def plot_multi_connectivity_spectrum(
     ax.set_ylabel("Connectivity")
     ax.legend(title=legend_title, loc="best")
     sns.despine(ax=ax)
+
+
+
     plt.tight_layout()
     return fig, ax
 
@@ -1308,6 +1474,8 @@ def plot_bivariate_spectrum(
     plot_individuals: bool = False,
     palette="hls",
     figsize=None,
+    ylims=None,
+    plot_horizontal: bool = False,
 ):
     """
     One subplot per node-pair: connectivity vs. freq, grouped by `hue`.
@@ -1357,9 +1525,9 @@ def plot_bivariate_spectrum(
                 arr = pivot.values  # shape=(n_subj,n_freqs)
                 # optional individual
                 if plot_individuals:
+                    color = sns.color_palette(palette, len(groups))[groups.index(grp)]
                     for row in arr:
-                        ax.plot(freqs, row, color=sns.color_palette(palette)[groups.index(grp)],
-                                alpha=0.3, linewidth=0.7)
+                        ax.plot(freqs, row, color=color, alpha=0.3, linewidth=0.7)
                 # mean + error
                 mean = np.nanmean(arr, axis=0)
                 if err_method == "sd":
@@ -1383,10 +1551,14 @@ def plot_bivariate_spectrum(
             if err is not None:
                 ax.fill_between(freqs, mean - err, mean + err,
                                 alpha=0.25, color=color)
-
+                
+        if plot_horizontal:
+            # plot a horizontal line at y=0.5
+            ax.axhline(0.5, color='gray', linestyle='--', linewidth=1, alpha=0.8)
         ax.set_title(lab)
         ax.set_xlabel("Frequency (Hz)")
         ax.set_ylabel("Connectivity")
+        ax.set_ylim(ylims)
         sns.despine(ax=ax)
 
     # legend

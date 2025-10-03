@@ -45,8 +45,8 @@ def compute_err(arr, how):
         return None
     if how == "sd":
         return np.nanstd(arr, axis=0, ddof=1)
-    if how == "sem":
+    if how == "sem" or how == 'se':
         return np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
     if how == "ci":
         return 1.96 * np.nanstd(arr, axis=0, ddof=1) / np.sqrt(arr.shape[0])
-    raise ValueError("err_method must be one of {'sd','sem','ci',None}")
+    raise ValueError("err_method must be one of {'sd','sem','se','ci',None}")
