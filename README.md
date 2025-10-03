@@ -13,6 +13,12 @@ _____
 pip install git+https://github.com/VasilisSz/epoch_tools.git
 ```
 
+To update to the latest version
+
+```bash
+pip install --upgrade git+https://github.com/VasilisSz/epoch_tools.git
+```
+
 ## Tutorials
 For detailed examples, see the tutorials directory, containing jupyter notebooks, showing the full functionality of the package, including
 
