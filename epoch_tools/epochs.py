@@ -1210,6 +1210,7 @@ class Epochs:
         freq_bands: dict | None = None,
         plot_individuals: bool = False,
         stats: str | None = None,
+        return_df: bool = False,
         err_method: str | None = "sem",
         palette: str = "hls",
         figsize: tuple | None = None,
@@ -1219,6 +1220,14 @@ class Epochs:
         vmax: float = 1.0,
         upper: bool = False,
         ylims: tuple | None = None,
+        n_permutations: int = 1000,                
+        sig_alpha_threshold: float = 0.05,         
+        sig_paired: bool = False,                   
+        sig_color: str = 'yellow',                 
+        sig_alpha: float = 0.3,                    
+        sig_threshold: float | None = None,
+        correction: str | None = None,  # NEW: 'fdr_bh', 'bonferroni', or None
+        correction_level: str = 'per_pair', 
         con_kwargs: dict | None = None
     ):
         """
@@ -1459,7 +1468,7 @@ class Epochs:
 
             elif plot_type in ['spectrum', 'line']:
  
-                fig, axes = plot_bivariate_spectrum(
+                out = plot_bivariate_spectrum(
                     df,
                     hue,
                     avg_level=avg_level,
@@ -1470,8 +1479,20 @@ class Epochs:
                     figsize=figsize,
                     ylims=ylims,
                     plot_horizontal=True if method in ['dpli', 'imcoh'] else False,
+                    show_significance=stats,
+                    n_permutations=n_permutations,                
+                    alpha=sig_alpha_threshold,                    
+                    paired=sig_paired,                            
+                    sig_color=sig_color,                          
+                    sig_alpha=sig_alpha,
+                    sig_threshold=sig_threshold,
+                    correction=correction,
+                    correction_level=correction_level,
+
                 )
-                return fig, axes
+                if return_df:
+                    return out, df
+                return out
             # Categorical per node‐pair × band
             out = plot_connectivity_categorical(
                 df,
@@ -1487,6 +1508,8 @@ class Epochs:
                 ylims=ylims,
                 **{}
             )
+            if return_df:
+                out += (df,)
             return out  # (fig, axes) or (fig, axes, stats_df)
 
         else:
@@ -1502,6 +1525,8 @@ class Epochs:
                     palette=palette,
                     figsize=figsize,
                 )
+                if return_df:
+                    return fig, ax, df
                 return fig, ax
 
             # Categorical per band
@@ -1518,10 +1543,9 @@ class Epochs:
                 figsize=figsize,
                 **{}
             )
+            if return_df:
+                out += (df,)
             return out  # (fig, ax) or (fig, ax, stats_df)
-
-        # Should never reach here
-        raise RuntimeError("Unexpected combination in compare_con()")
 
     def compare_ei(
         self,

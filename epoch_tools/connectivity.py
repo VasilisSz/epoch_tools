@@ -1476,6 +1476,15 @@ def plot_bivariate_spectrum(
     figsize=None,
     ylims=None,
     plot_horizontal: bool = False,
+    show_significance: bool = False,      
+    n_permutations: int = 1000,           
+    alpha: float = 0.05,                  
+    paired: bool = True,                  
+    sig_color: str = 'yellow',            
+    sig_alpha: float = 0.3,
+    sig_threshold: float | None = None,
+    correction: str | None = None,  # NEW: 'fdr_bh', 'bonferroni', or None
+    correction_level: str = 'per_pair',  # NEW: 'per_pair' or 'global'     
 ):
     """
     One subplot per node-pair: connectivity vs. freq, grouped by `hue`.
@@ -1503,6 +1512,41 @@ def plot_bivariate_spectrum(
     labels = [f"{p.node1}-{p.node2}" for p in pairs]
     # re‐fetch pairs as list
     pairs = list(df[["node1","node2"]].drop_duplicates().itertuples(index=False))
+
+
+    # Compute significance if requested
+    sig_results = None
+    if show_significance and len(groups) == 2:
+        from .stats import permutation_test_pairwise, permutation_test_cluster
+        
+        # Ensure we have exactly 2 groups
+        if len(groups) != 2:
+            warnings.warn("Significance testing requires exactly 2 groups. Skipping.")
+            show_significance = False
+        else:
+            if show_significance == 'cluster':
+                print(f"Computing permutation tests (n={n_permutations})...")
+                sig_results = permutation_test_cluster(
+                    df=df,
+                    hue=hue_plot,
+                    subject_col='animal_id' if avg_level == 'subject' else None,
+                    n_permutations=n_permutations,
+                    alpha=alpha,
+                    paired=paired and avg_level == 'subject',
+                    threshold=sig_threshold,
+                )
+            elif show_significance == 'permutation':
+                sig_results = permutation_test_pairwise(
+                    df=df,
+                    hue=hue_plot,
+                    subject_col='animal_id' if avg_level == 'subject' else None,
+                    n_permutations=n_permutations,
+                    alpha=alpha,
+                    paired=paired and avg_level == 'subject',
+                    correction=correction,
+                    correction_level=correction_level,
+                )
+
 
     n = len(pairs)
     nrows, ncols = row_col_layout(n)
@@ -1560,6 +1604,53 @@ def plot_bivariate_spectrum(
         ax.set_ylabel("Connectivity")
         ax.set_ylim(ylims)
         sns.despine(ax=ax)
+        
+        # Add significance markers
+        if show_significance and sig_results is not None:
+            # Get significance for this node pair
+            pair_sig = sig_results[
+                (sig_results['node1'] == node1) & 
+                (sig_results['node2'] == node2) &
+                (sig_results['significant'] == True)
+            ]
+            
+            if len(pair_sig) > 0:
+                sig_freqs = sorted(pair_sig['freq'].values)
+                
+                # Group consecutive frequencies into ranges
+                if len(sig_freqs) > 0:
+                    # Get frequency resolution
+                    all_freqs = sorted(sub['freq'].unique())
+                    if len(all_freqs) > 1:
+                        freq_resolution = np.median(np.diff(all_freqs))
+                    else:
+                        freq_resolution = 1.0
+                    
+                    # Group consecutive frequencies
+                    sig_ranges = []
+                    current_start = sig_freqs[0]
+                    current_end = sig_freqs[0]
+                    
+                    for j in range(1, len(sig_freqs)):
+                        freq_gap = sig_freqs[j] - current_end
+                        if freq_gap <= 1.5 * freq_resolution:
+                            current_end = sig_freqs[j]
+                        else:
+                            sig_ranges.append((current_start, current_end))
+                            current_start = sig_freqs[j]
+                            current_end = sig_freqs[j]
+                    sig_ranges.append((current_start, current_end))
+                    
+                    # Draw yellow shaded boxes for significant ranges
+                    y_min, y_max = ax.get_ylim()
+                    for start_freq, end_freq in sig_ranges:
+                        ax.axvspan(
+                            start_freq - 0.5 * freq_resolution,
+                            end_freq + 0.5 * freq_resolution,
+                            color=sig_color,
+                            alpha=sig_alpha,
+                            zorder=0
+                        )
 
     # legend
     handles, labels_ = axes[0].get_legend_handles_labels()
@@ -1570,4 +1661,8 @@ def plot_bivariate_spectrum(
         ax.set_visible(False)
 
     plt.tight_layout()
+
+    # create dataframe with the significance results
+    if sig_results is not None:
+        return fig, axes, sig_results
     return fig, axes

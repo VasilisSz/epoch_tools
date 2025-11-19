@@ -66,6 +66,10 @@ class ClusterInterpreter:
         self.y_test = None
         self.y_pred = None
 
+        # Shap values
+        self.shap_values = None
+        self.explainer = None
+
     def fit(self):
         """
         Fit the chosen model on epoch_tools.Epochs' features (epochs.feats) to predict cluster labels (epochs.labels).
@@ -640,10 +644,10 @@ class ClusterInterpreter:
         if self.model is None or self.y_pred is None:
             raise ValueError("Model not trained or y_pred not available. Call `fit(...)` first.")
 
-        explainer = shap.TreeExplainer(self.model)
-        shap_values = explainer.shap_values(self.X[:n_samples])
+        self.explainer = shap.TreeExplainer(self.model)
+        self.shap_values = self.explainer.shap_values(self.X[:n_samples])
 
-        return explainer, shap_values
+        return self.explainer, self.shap_values
 
     def plot_shap_summary(self, 
                           cluster=None,
@@ -673,9 +677,12 @@ class ClusterInterpreter:
             Whether to display the plot immediately.
         """
 
+        # Get SHAP values if not already computed
+        if self.explainer is None or self.shap_values is None:
+            self.get_shap_values(n_samples=n_samples)
+        shap_values = self.shap_values
 
-        explainer, shap_values = self.get_shap_values(n_samples=n_samples)
-        n_clusters = shap_values.shape[2]
+        n_clusters = self.shap_values.shape[2]
 
         if cluster is not None:
 
@@ -720,8 +727,8 @@ class ClusterInterpreter:
                 # You can set a custom subplot title here
                 axes[cluster_idx].set_title(f"Cluster {cluster_label}", fontsize=12)
 
-            plt.tight_layout()
             if display:
+                plt.tight_layout()
                 plt.show()
 
     def plot_shap_decision_plot(
@@ -755,7 +762,11 @@ class ClusterInterpreter:
         display : bool, optional
             Whether to display the plot immediately.
         """
-        explainer, shap_values = self.get_shap_values(n_samples=n_shap_samples)
+
+        if self.explainer is None or self.shap_values is None:
+            self.get_shap_values(n_samples=n_shap_samples)
+        shap_values = self.shap_values
+        explainer = self.explainer
         n_clusters = shap_values.shape[2]
         n_features = shap_values.shape[1]
         
@@ -842,8 +853,10 @@ class ClusterInterpreter:
             If True, display the plot immediately (plt.show()).
             Otherwise, return the figure object for further manipulation.
         """
-
-        explainer, shap_values_3d = self.get_shap_values(n_samples=n_shap_samples)
+        if self.explainer is None or self.shap_values is None:
+            self.get_shap_values(n_samples=n_shap_samples)
+        explainer = self.explainer
+        shap_values_3d = self.shap_values
         n_classes = shap_values_3d.shape[2]
 
 
