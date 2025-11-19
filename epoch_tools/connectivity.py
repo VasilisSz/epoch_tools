@@ -64,7 +64,7 @@ def connectivity_df(
 
     if freq_bands is None:
         freq_bands = {
-            "Delta": (2, 4), "Theta": (4, 8),
+            "Delta": (1, 4), "Theta": (4, 8),
             "Alpha": (8,13), "Beta": (13,30), "Gamma": (30,100)
         }
 
@@ -717,7 +717,7 @@ def plot_connectivity_categorical(
     #                     freq_bands=freq_bands)
     if freq_bands is None:
         freq_bands = {
-            "Delta":(2,4),"Theta":(4,8),"Alpha":(8,13),
+            "Delta":(1,4),"Theta":(4,8),"Alpha":(8,13),
             "Beta":(13,30),"Gamma":(30,100)
         }
 
@@ -909,7 +909,7 @@ def compute_multi_connectivity_df(
     """
     if freq_bands is None:
         freq_bands = {
-            "Delta": (2, 4),
+            "Delta": (1, 4),
             "Theta": (4, 8),
             "Alpha": (8, 13),
             "Beta":  (13, 30),
@@ -1176,7 +1176,7 @@ def plot_multi_connectivity_band(
     # 0) Default freq_bands
     if freq_bands is None:
         freq_bands = {
-            "Delta": (2, 4),
+            "Delta": (1, 4),
             "Theta": (4, 8),
             "Alpha": (8, 13),
             "Beta":  (13, 30),
