@@ -46,9 +46,12 @@ def compute_con(epochs, method, fmin=1, fmax=100, con_kwargs: dict | None = None
         numpy.ndarray
             The connectivity matrix.
     """
+    connectivity_kwargs = dict(con_kwargs or {})
+    connectivity_kwargs.setdefault("verbose", "ERROR")
     con = spectral_connectivity_epochs(
         epochs, method=method, mode='multitaper', sfreq=epochs.info['sfreq'],
-        fmin=fmin, fmax=fmax, faverage=True, verbose="ERROR", gc_n_lags=40, **(con_kwargs if con_kwargs is not None else {})
+        fmin=fmin, fmax=fmax, faverage=True, gc_n_lags=40,
+        **connectivity_kwargs
     )
     return con.get_data(output='dense')
 
